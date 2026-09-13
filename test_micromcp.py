@@ -131,6 +131,15 @@ check("bad Origin -> 403", s, 403)
 s, r = post("tools/list", hdrs={"Origin": "https://ok.example"})
 check("good Origin -> 200", s, 200)
 
+# A handshake-era client must be refused with -32022 and our version list,
+# not a header complaint: -32022 is what a dual-era client reads as
+# "modern peer", so it reports a real incompatibility instead of guessing.
+for legacy in ("initialize", "ping", "notifications/initialized"):
+    s, r = post(legacy)
+    check(f"{legacy} -> -32022", (s, r["error"]["code"]), (400, -32022))
+check("refusal advertises our version",
+      post("initialize")[1]["error"]["data"]["supported"], ["2026-07-28"])
+
 req = urllib.request.Request("http://127.0.0.1:8222/mcp", method="GET")
 try:
     urllib.request.urlopen(req); code = 200

@@ -33,6 +33,10 @@ INVALID_PARAMS = -32602
 HEADER_MISMATCH = -32020         # spec-allocated
 UNSUPPORTED_VERSION = -32022     # spec-allocated; must carry data.supported
 
+# Methods that exist only in the initialize-handshake era (2024-11-05 .. 2025-11-25).
+# This server does not implement them; it names them so it can refuse precisely.
+HANDSHAKE_METHODS = frozenset({"initialize", "notifications/initialized", "ping"})
+
 
 # ---------------------------------------------------------------- schema gen
 _PRIM = {int: "integer", float: "number", str: "string", bool: "boolean",
@@ -367,6 +371,18 @@ class _Core:
         method = body.get("method")
         params = body.get("params") or {}
         meta = params.get("_meta") or {}
+
+        if method in HANDSHAKE_METHODS:
+            # A handshake-era client. This server is stateless-only by choice, so
+            # answer with -32022 and our version list rather than a header
+            # complaint: -32022 is the code a dual-era client reads as "modern
+            # peer, renegotiate", which turns a confusing failure into an
+            # accurate "no mutually supported version".
+            raise Error(UNSUPPORTED_VERSION,
+                        f"this server implements only the stateless MCP revision "
+                        f"{PROTOCOL}; {method!r} belongs to the superseded "
+                        f"initialize-handshake era",
+                        data={"supported": [PROTOCOL]})
 
         if not ver:
             raise Error(HEADER_MISMATCH, "missing MCP-Protocol-Version header")
