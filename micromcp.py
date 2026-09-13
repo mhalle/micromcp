@@ -39,6 +39,59 @@ _PRIM = {int: "integer", float: "number", str: "string", bool: "boolean",
          list: "array", dict: "object"}
 
 
+class Context:
+    """Injected handler parameter for streaming progress and log messages.
+
+        @mcp.tool
+        async def segment(volume: str, ctx: Context) -> dict:
+            for i, step in enumerate(steps, 1):
+                await ctx.report_progress(i, len(steps), step.name)
+            await ctx.info("done")
+
+    Declaring this parameter is what makes a tool stream: the ASGI transport
+    answers such a call with an SSE stream instead of a single JSON object.
+    Like Principal it is filled server-side and hidden from the input schema.
+
+    Under WSGI — which has no portable way to detect a client hang-up, and so
+    cannot honor the spec's cancellation rule — notifications are dropped and
+    the call still returns its normal JSON result.
+    """
+
+    def __init__(self, emit=None, progress_token=None):
+        self._emit = emit
+        self._token = progress_token
+
+    @property
+    def streaming(self) -> bool:
+        """False when nothing is listening (WSGI, or a client sending no token)."""
+        return self._emit is not None
+
+    async def report_progress(self, progress, total=None, message=None):
+        # No token means the client did not opt in; there is nothing to
+        # correlate the notification to, so dropping it is the correct behavior.
+        if self._emit is None or self._token is None:
+            return
+        params = {"progressToken": self._token, "progress": float(progress)}
+        if total is not None:
+            params["total"] = float(total)
+        if message is not None:
+            params["message"] = message
+        await self._emit("notifications/progress", params)
+
+    async def log(self, level, data, logger=None):
+        if self._emit is None:
+            return
+        params = {"level": level, "data": data}
+        if logger:
+            params["logger"] = logger
+        await self._emit("notifications/message", params)
+
+    async def debug(self, data, **k): await self.log("debug", data, **k)
+    async def info(self, data, **k): await self.log("info", data, **k)
+    async def warning(self, data, **k): await self.log("warning", data, **k)
+    async def error(self, data, **k): await self.log("error", data, **k)
+
+
 class Principal:
     """Marker annotation: this parameter receives the authenticated principal.
 
@@ -109,16 +162,20 @@ def _resolve(owner, name, ann):
         return None
 
 
-def _input_schema(fn) -> tuple[dict, str | None]:
-    """Return (inputSchema, principal_param_name)."""
+def _input_schema(fn) -> tuple[dict, dict]:
+    """Return (inputSchema, {"principal": name|None, "context": name|None})."""
     hints = _hints(fn)
-    props, required, principal = {}, [], None
+    props, required = {}, []
+    inject = {"principal": None, "context": None}
     for name, p in inspect.signature(fn).parameters.items():
         if name in ("self", "request"):
             continue
         ann = hints.get(name, p.annotation)
         if ann is Principal:
-            principal = name           # injected, never exposed to the model
+            inject["principal"] = name    # injected, never exposed to the model
+            continue
+        if ann is Context:
+            inject["context"] = name
             continue
         s = _schema(ann)
         if p.default is inspect.Parameter.empty:
@@ -129,7 +186,7 @@ def _input_schema(fn) -> tuple[dict, str | None]:
     out = {"type": "object", "properties": props}
     if required:
         out["required"] = required
-    return out, principal
+    return out, inject
 
 
 def _output_schema(fn, explicit):
@@ -188,7 +245,7 @@ class MCP:
         """
         def wrap(f):
             n = name or f.__name__
-            schema, principal = _input_schema(f)
+            schema, inject = _input_schema(f)
             hints = {"readOnlyHint": read_only, "destructiveHint": destructive,
                      "idempotentHint": idempotent}
             ann = {**{k: v for k, v in hints.items() if v is not None},
@@ -197,7 +254,8 @@ class MCP:
                 "name": n,
                 "description": inspect.getdoc(f) or "",
                 "inputSchema": schema,
-                "_fn": f, "_guards": guards, "_principal": principal,
+                "_fn": f, "_guards": guards,
+                "_principal": inject["principal"], "_context": inject["context"],
             }
             if title:
                 entry["title"] = title
@@ -334,7 +392,7 @@ class _Core:
         return method, params
 
     # -- dispatch ---------------------------------------------------------
-    async def _dispatch(self, method, params, principal):
+    async def _dispatch(self, method, params, principal, emit=None):
         """Async so handlers may be `async def`. Sync handlers work unchanged."""
         m = self.mcp
 
@@ -382,6 +440,9 @@ class _Core:
             kwargs = dict(params.get("arguments") or {})
             if entry["_principal"]:
                 kwargs[entry["_principal"]] = principal
+            if entry["_context"]:
+                token = (params.get("_meta") or {}).get("progressToken")
+                kwargs[entry["_context"]] = Context(emit, token)
             try:
                 return _as_content(await run(entry["_fn"], kwargs))
             except Exception as exc:
@@ -407,8 +468,27 @@ class _Core:
         raise Error(METHOD_NOT_FOUND, f"unknown method {method!r}", 404)
 
     # -- one request, start to finish -------------------------------------
-    async def handle(self, http_method, headers, raw):
-        """Return (status_code, payload). The only entry point transports need."""
+    def wants_stream(self, raw) -> bool:
+        """True when the addressed tool declares a Context parameter.
+
+        Decided from the request alone, BEFORE any bytes are written — once an
+        SSE stream is open there is no way back to a JSON error response.
+        """
+        try:
+            body = json.loads(raw or b"{}")
+        except Exception:
+            return False
+        if body.get("method") != "tools/call":
+            return False
+        entry = self.mcp.tools.get((body.get("params") or {}).get("name"))
+        return bool(entry and entry.get("_context"))
+
+    async def handle(self, http_method, headers, raw, emit=None):
+        """Return (status_code, payload). The only entry point transports need.
+
+        `emit(method, params)` is an async sink for notifications; None means
+        nothing is listening and Context silently drops them.
+        """
         if http_method != "POST":
             # Legacy GET/DELETE session mechanics are gone in this revision.
             return 405, {"error": "POST only"}
@@ -422,7 +502,7 @@ class _Core:
         try:
             method, params = self._validate(headers, body)
             principal = self.authenticate(headers) if self.authenticate else None
-            result = await self._dispatch(method, params, principal)
+            result = await self._dispatch(method, params, principal, emit)
             # 2026-07-28 requires these on EVERY result. They have SDK-side
             # defaults when parsing, but the strict per-version schema that
             # governs a live connection demands them explicitly.
@@ -525,13 +605,72 @@ class ASGIServer(_Core):
             raw += msg.get("body", b"")
             more = msg.get("more_body", False)
 
-        status, payload = await self.handle(scope.get("method", "POST"), headers, raw)
+        http_method = scope.get("method", "POST")
+        if http_method == "POST" and self.wants_stream(raw):
+            return await self._stream(headers, raw, receive, send)
+
+        status, payload = await self.handle(http_method, headers, raw)
 
         data = json.dumps(payload).encode()
         await send({"type": "http.response.start", "status": status,
                     "headers": [(b"content-type", b"application/json"),
                                 (b"content-length", str(len(data)).encode())]})
         await send({"type": "http.response.body", "body": data})
+
+    async def _stream(self, headers, raw, receive, send):
+        """Answer one request with a request-scoped SSE stream.
+
+        Notifications first, then the final JSON-RPC response, which closes the
+        stream. Closing the stream from the client side is cancellation: the
+        handler task is cancelled and nothing further is sent.
+        """
+        await send({"type": "http.response.start", "status": 200, "headers": [
+            (b"content-type", b"text/event-stream"),
+            (b"cache-control", b"no-cache"),
+            # Tell nginx and friends not to buffer, or frames arrive in a lump.
+            (b"x-accel-buffering", b"no"),
+        ]})
+
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def emit(method, params):
+            await queue.put({"jsonrpc": "2.0", "method": method, "params": params})
+
+        async def run():
+            try:
+                _status, payload = await self.handle("POST", headers, raw, emit=emit)
+                await queue.put(payload)
+            finally:
+                await queue.put(None)          # end-of-stream sentinel
+
+        async def disconnected():
+            while True:
+                msg = await receive()
+                if msg["type"] == "http.disconnect":
+                    return
+
+        worker = asyncio.create_task(run())
+        watcher = asyncio.create_task(disconnected())
+        try:
+            while True:
+                nxt = asyncio.create_task(queue.get())
+                done, _ = await asyncio.wait({nxt, watcher},
+                                             return_when=asyncio.FIRST_COMPLETED)
+                if watcher in done:            # client hung up: stop work, send nothing
+                    nxt.cancel()
+                    worker.cancel()
+                    return
+                item = nxt.result()
+                if item is None:
+                    break
+                await send({"type": "http.response.body",
+                            "body": b"data: " + json.dumps(item).encode() + b"\n\n",
+                            "more_body": True})
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+        finally:
+            watcher.cancel()
+            if not worker.done():
+                worker.cancel()
 
 
 # ---------------------------------------------------------------- adapters
