@@ -6,7 +6,8 @@ the check that catches results which parse loosely but are rejected by a real
 client: notably a result missing resultType / ttlMs / cacheScope.
 """
 import io, json
-from mcp_types.methods import validate_server_result, validate_client_request
+from mcp_types.methods import (validate_server_result, validate_client_request,
+                               parse_server_notification)
 from micromcp import MCP, Server, PROTOCOL, META_VER, META_CAPS
 
 mcp = MCP("newton-crashes", "0.1.0")
@@ -86,6 +87,23 @@ try:
     print("\n  CONFORMS   (client request shape)")
 except Exception as e:
     print(f"\n  REJECTED   client request: {str(e)[:90]}")
+
+# Notification frames are a separate wire surface; check those too.
+print()
+for note in [
+    {"jsonrpc": "2.0", "method": "notifications/progress",
+     "params": {"progressToken": "p1", "progress": 1.0, "total": 5.0,
+                "message": "step 1"}},
+    {"jsonrpc": "2.0", "method": "notifications/message",
+     "params": {"level": "info", "data": "finished"}},
+]:
+    try:
+        parse_server_notification(note["method"], PROTOCOL, note["params"])
+        print(f"  CONFORMS   {note['method']}")
+        ok += 1
+    except Exception as e:
+        print(f"  REJECTED   {note['method']}: {str(e)[:80]}")
+        fail += 1
 
 print(f"\n{ok} conforming, {fail} rejected")
 raise SystemExit(1 if fail else 0)
