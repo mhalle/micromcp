@@ -30,7 +30,7 @@ app = modal.App("micromcp-ui")
 def web():
     import json
     import time
-    from micromcp import MCP, ASGIServer, embedded_resource
+    from micromcp import MCP, ASGIServer
 
     mcp = MCP("newton-civic-ui", "0.1.0")
 
@@ -91,24 +91,16 @@ request("ui/initialize", {appInfo: {name: "crash-widget", version: "0.1.0"}, app
     @mcp.tool(title="Show crash chart", read_only=True,
               meta={"ui": {"resourceUri": "ui://crash-widget-v3"}, "ui/resourceUri": "ui://crash-widget-v3"})
     def show_crash_chart(street: str = "Washington St") -> dict:
-        """Show a chart of crashes by year for a street (reference-style: the host
-        loads the widget from ui://crash-widget-v3 and feeds it this result).
+        """Show a chart of crashes by year for a street. The host loads the widget
+        from the ui:// resource named in this tool's _meta and feeds it this
+        result; hosts that follow the MCP-UI convention instead would want the
+        widget as an embedded_resource() block in `content`.
 
         Args:
             street: Street name.
         """
         by = _by_year(street)
         return {"content": [{"type": "text", "text": f"Crash chart for {street}: " + ", ".join(f"{y}={n}" for y, n in by.items())}],
-                "structuredContent": {"street": street, "by_year": by},
-                "_meta": {"ui": {"height": 240}}}
-
-    @mcp.tool(title="Show crash chart (embedded)", read_only=True,
-              meta={"ui": {"resourceUri": "ui://crash-widget-v3"}, "ui/resourceUri": "ui://crash-widget-v3"})
-    def show_crash_chart_embedded(street: str = "Washington St") -> dict:
-        """Same chart, but the result also carries the widget as an embedded resource block."""
-        by = _by_year(street)
-        return {"content": [{"type": "text", "text": f"Crash chart for {street}: " + ", ".join(f"{y}={n}" for y, n in by.items())},
-                            embedded_resource("ui://crash-widget-v3", text=HTML, mime_type="text/html;profile=mcp-app")],
                 "structuredContent": {"street": street, "by_year": by},
                 "_meta": {"ui": {"height": 240}}}
 
