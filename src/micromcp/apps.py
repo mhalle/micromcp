@@ -417,23 +417,27 @@ def _document(body, *, title, head, scripts, modules, styles, route, fetch, impo
         parts.append('<script type="importmap">'
                      + json.dumps({"imports": imports}).replace("</", "<\\/") + "</script>")
     parts.append(_script(BRIDGE_JS))
+    # The page's own scripts follow the body, so they can reach its elements when they run;
+    # the bridge and the import map stay in the head, ahead of anything that needs them.
+    tail = []
     for module, group in ((False, scripts), (True, modules)):
         for item in _items(group):
             text, origin = _asset(item, "module" if module else "script")
             if origin:
                 origins.add(origin)
                 kind = ' type="module"' if module else ""
-                parts.append(f'<script{kind} src="{_html.escape(text)}"></script>')
+                tail.append(f'<script{kind} src="{_html.escape(text)}"></script>')
             else:
-                parts.append(_script(text, module))
+                tail.append(_script(text, module))
     return ("<!doctype html><html><head>" + "".join(parts) + "</head><body>" + body
-            + "</body></html>"), origins
+            + "".join(tail) + "</body></html>"), origins
 
 
 def page(body: str, *, title: str = "", head: str = "", scripts=(), modules=(), styles=(),
          imports: dict | None = None, route: str | None = None, fetch: str = "hooks") -> str:
     """A complete widget document around `body`: `styles`, `head`, the
-    `imports` map, `BRIDGE_JS`, then `scripts` and `modules` in order. Each
+    `imports` map and `BRIDGE_JS` in the head, then `body`, then `scripts` and
+    `modules` in order, so a script can reach the page's elements. Each
     asset is source text, a `pathlib.Path` (inlined), or an https URL (loaded;
     the host must allow its origin — `Widget` declares that for you).
     `imports` maps module specifiers to https URLs (`{"three": ".../three.module.js"}`)
