@@ -159,9 +159,13 @@ passed through for the host to honor; `guards=` remains the only server-side
 enforcement.
 
 Verified 2026-09-14 in the Claude desktop chat via a custom connector
-(`examples/mcp_app_modal.py`, deployed on Modal): the host prefetches the
-`ui://` widget, calls the tool, delivers the result to the iframe, and renders
-it. Two host behaviors worth knowing: the connector validator negotiates by
+(`examples/mcp_app_modal.py`, deployed on Modal), twice: first with an early
+widget, then with the current one, which completes the 2026-01-26 handshake,
+answers `ping` and `ui/resource-teardown`, renders only host-delivered
+results, and reports its size from a `ResizeObserver`. On a fresh connector
+the host prefetches the `ui://` widget before its first `tools/call`, calls
+the tool, delivers the result to the iframe as `ui/notifications/tool-result`,
+and renders it. Two host behaviors worth knowing: the connector validator negotiates by
 sending `initialize`, taking the `-32022` refusal, and retrying with
 `server/discover`; and the host caches a connector's widget after its first
 fetch, so a changed widget needs a new connector identity to be picked up.
