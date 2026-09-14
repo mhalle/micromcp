@@ -6,6 +6,7 @@ where the client abstracts away what we need to assert.
 import asyncio, io, json, socket, threading, time
 import httpx
 from micromcp import MCP, Server, ASGIServer, Context, PROTOCOL, META_VER, META_CAPS
+from _helpers import free_port
 
 mcp = MCP("demo", "0.1.0")
 CANCELLED = threading.Event()
@@ -101,8 +102,9 @@ async def read_sse(url, tool, args=None, token=None, stop_after=None):
 
 
 async def main():
-    srv = serve(asgi_app, 8701)
-    url = "http://127.0.0.1:8701/mcp"
+    port = free_port()
+    srv = serve(asgi_app, port)
+    url = f"http://127.0.0.1:{port}/mcp"
 
     print("— streaming shape —")
     ctype, frames, hdrs = await read_sse(url, "crunch", {"steps": 5}, token="p1")

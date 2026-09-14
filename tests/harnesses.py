@@ -6,6 +6,7 @@ import json, socket, subprocess, sys, threading, time
 import urllib.request, urllib.error
 
 from micromcp import MCP, Server, ASGIServer, PROTOCOL, META_VER, META_CAPS
+from _helpers import free_port
 
 mcp = MCP("demo", "0.1.0")
 
@@ -68,10 +69,11 @@ def case_wsgiref():
         protocol_version = "HTTP/1.1"
         def log_message(self, *a): pass
     class T(ThreadingMixIn, WSGIServer): daemon_threads = True
-    srv = make_server("127.0.0.1", 8501, wsgi_app, server_class=T, handler_class=Q)
+    port = free_port()
+    srv = make_server("127.0.0.1", port, wsgi_app, server_class=T, handler_class=Q)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
-        return call(8501)
+        return call(port)
     finally:
         srv.shutdown()
 
@@ -87,13 +89,14 @@ def case_flask():
         return "a normal Flask route"
 
     combined = DispatcherMiddleware(flask_app, {"/mcp": wsgi_app})
-    srv = wz_make_server("127.0.0.1", 8502, combined, threaded=True)
+    port = free_port()
+    srv = wz_make_server("127.0.0.1", port, combined, threaded=True)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
         # the ordinary Flask route still works
-        with urllib.request.urlopen("http://127.0.0.1:8502/", timeout=5) as r:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5) as r:
             assert b"normal Flask route" in r.read()
-        return call(8502, "/mcp/")
+        return call(port, "/mcp/")
     finally:
         srv.shutdown()
 
@@ -112,14 +115,15 @@ def case_starlette():
         Route("/", home),
         Mount("/mcp", app=WSGIMiddleware(wsgi_app)),
     ])
-    cfg = uvicorn.Config(app, host="127.0.0.1", port=8503, log_level="critical")
+    port = free_port()
+    cfg = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="critical")
     srv = uvicorn.Server(cfg)
     threading.Thread(target=srv.run, daemon=True).start()
-    wait(8503)
+    wait(port)
     try:
         # Mount("/mcp") issues a 307 to "/mcp/"; urllib will not replay a POST
         # across a redirect, so address the canonical path directly.
-        return call(8503, "/mcp/")
+        return call(port, "/mcp/")
     finally:
         srv.should_exit = True
 
@@ -129,36 +133,45 @@ def case_starlette_native():
     from starlette.applications import Starlette
     from starlette.routing import Mount
     app = Starlette(routes=[Mount("/mcp", app=asgi_app)])
-    cfg = uvicorn.Config(app, host="127.0.0.1", port=8506, log_level="critical")
+    port = free_port()
+    cfg = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="critical")
     srv = uvicorn.Server(cfg)
     threading.Thread(target=srv.run, daemon=True).start()
-    wait(8506)
+    wait(port)
     try:
-        return call(8506, "/mcp/", tool="aadd")   # async handler, natively awaited
+        return call(port, "/mcp/", tool="aadd")   # async handler, natively awaited
     finally:
         srv.should_exit = True
 
 # 4 ── waitress (production WSGI server) ------------------------------------
 def case_waitress():
     import waitress
+    port = free_port()
     t = threading.Thread(target=waitress.serve,
-                         kwargs=dict(app=wsgi_app, host="127.0.0.1", port=8504,
+                         kwargs=dict(app=wsgi_app, host="127.0.0.1", port=port,
                                      _quiet=True, threads=4), daemon=True)
     t.start()
-    wait(8504)
-    return call(8504, tool="aadd")   # async handler via the WSGI background loop
+    wait(port)
+    return call(port, tool="aadd")   # async handler via the WSGI background loop
 
 # 5 ── gunicorn (separate process, as in production) ------------------------
 def case_gunicorn():
+    import contextlib, os, signal
+    port = free_port()
     p = subprocess.Popen(
-        [sys.executable, "-m", "gunicorn", "-b", "127.0.0.1:8505",
+        [sys.executable, "-m", "gunicorn", "-b", f"127.0.0.1:{port}",
          "-w", "2", "--log-level", "error", "harnesses:wsgi_app"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cwd=os.path.dirname(os.path.abspath(__file__)), start_new_session=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     try:
-        wait(8505, timeout=20)
-        return call(8505)
+        assert wait(port, timeout=20), "gunicorn did not come up"
+        return call(port)
     finally:
-        p.terminate(); p.wait(timeout=10)
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(p.pid, signal.SIGKILL)
+        p.wait(timeout=10)
+        if p.returncode not in (0, -signal.SIGKILL):
+            print("gunicorn stderr:", p.stderr.read().decode()[-800:])
 
 
 def main():

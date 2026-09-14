@@ -1,0 +1,85 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "micromcp"
+dynamic = ["version"]
+description = "A minimum-viable, dependency-free MCP server for the stateless 2026-07-28 protocol revision (WSGI and ASGI)."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.11"
+authors = [{ name = "the micromcp authors" }]
+keywords = ["mcp", "model-context-protocol", "wsgi", "asgi", "server"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Internet :: WWW/HTTP :: WSGI :: Application",
+  "Typing :: Typed",
+]
+dependencies = []
+
+[project.optional-dependencies]
+django = ["django>=4.2"]
+
+# Test dependencies are a PEP 735 group, not a published extra: they resolve to
+# ~100 packages, which has no place in the metadata of a zero-dependency library.
+#   uv pip install -e . --group test      or      pip install -e . --group test
+[dependency-groups]
+test = [
+  "pytest>=8",
+  "ruff",
+  "mcp>=2.2,<3",
+  "mcp-types>=2.2,<3",
+  "uvicorn",
+  "starlette",
+  "httpx",
+  "flask",
+  "waitress",
+  "gunicorn",
+  "a2wsgi",
+  "django>=4.2",
+  "pydantic>=2",
+]
+
+[project.urls]
+Homepage = "https://github.com/mhalle/micromcp"
+Changelog = "https://github.com/mhalle/micromcp/blob/main/CHANGELOG.md"
+
+[tool.hatch.version]
+path = "src/micromcp/__init__.py"
+
+[tool.hatch.build.targets.sdist]
+include = ["src/micromcp", "tests", "tools", ".github", "README.md", "CHANGELOG.md", "SECURITY.md", "LICENSE", "NOTICE"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/micromcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_scripts.py"]   # the other files are runnable scripts, driven by test_scripts.py
+markers = [
+  "unit: stdlib only (may bind a loopback port), no optional dependencies",
+  "conform: schema validation against mcp-types",
+  "server: starts local servers (uvicorn, waitress, gunicorn)",
+  "interop: drives the official mcp / FastMCP clients",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP"]
+ignore = ["E731"]
+
+[tool.ruff.lint.per-file-ignores]
+# The suites are deliberately dense scripts; keep the F/B classes that catch real bugs.
+"tests/*" = ["E401", "E402", "E501", "E701", "E702", "E741", "B006", "B007", "B008", "B011", "B017", "B018", "B020", "B023", "B905", "UP"]

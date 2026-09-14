@@ -2,6 +2,7 @@
 import json, threading, urllib.request, urllib.error
 from wsgiref.simple_server import make_server, WSGIRequestHandler
 from micromcp import MCP, Server, PROTOCOL, META_VER, META_CAPS
+from _helpers import free_port
 
 mcp = MCP("demo", "0.1.0")
 
@@ -39,7 +40,8 @@ app = Server(mcp, allowed_origins={"https://ok.example"}, authenticate=auth)
 class Quiet(WSGIRequestHandler):
     def log_message(self, *a): pass
 
-srv = make_server("127.0.0.1", 8222, app, handler_class=Quiet)
+PORT = free_port()
+srv = make_server("127.0.0.1", PORT, app, handler_class=Quiet)
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 
 
@@ -56,7 +58,7 @@ def post(method, params=None, *, hdrs=None, meta=True, name=None, caps=True):
     nm = name if name is not None else (params.get("name") or params.get("uri"))
     if nm: h["Mcp-Name"] = nm
     h.update(hdrs or {})
-    req = urllib.request.Request("http://127.0.0.1:8222/mcp",
+    req = urllib.request.Request(f"http://127.0.0.1:{PORT}/mcp",
                                  data=json.dumps(body).encode(), headers=h, method="POST")
     try:
         with urllib.request.urlopen(req) as r:
@@ -77,7 +79,10 @@ def check(label, got, want):
 print("— happy path —")
 s, r = post("tools/list")
 names = sorted(t["name"] for t in r["result"]["tools"])
-check("tools/list returns all tools", names, ["boom", "protected", "severity_breakdown"])
+check("tools/list hides guarded tools from anonymous callers", names, ["boom", "severity_breakdown"])
+s2, r2 = post("tools/list", hdrs={"Authorization": "Bearer good"})
+check("tools/list shows guarded tools to a principal",
+      sorted(t["name"] for t in r2["result"]["tools"]), ["boom", "protected", "severity_breakdown"])
 sch = [t for t in r["result"]["tools"] if t["name"] == "severity_breakdown"][0]["inputSchema"]
 check("schema: str|None -> anyOf", sch["properties"]["street"],
       {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None})
@@ -119,7 +124,7 @@ check("Mcp-Name mismatch -> 400/-32020", (s, r["error"]["code"]), (400, -32020))
 s, r = post("tools/list", hdrs={"MCP-Protocol-Version": "2025-06-18"})
 check("version header/body mismatch -> 400", (s, r["error"]["code"]), (400, -32020))
 s, r = post("tools/list", meta=False)
-check("missing _meta entirely -> -32020", (s, r["error"]["code"]), (400, -32020))
+check("missing _meta entirely -> -32602 (envelope before headers)", (s, r["error"]["code"]), (400, -32602))
 s, r = post("tools/list", caps=False)
 check("missing clientCapabilities -> -32602", (s, r["error"]["code"]), (400, -32602))
 s, r = post("nope/nope")
@@ -140,7 +145,7 @@ for legacy in ("initialize", "ping", "notifications/initialized"):
 check("refusal advertises our version",
       post("initialize")[1]["error"]["data"]["supported"], ["2026-07-28"])
 
-req = urllib.request.Request("http://127.0.0.1:8222/mcp", method="GET")
+req = urllib.request.Request(f"http://127.0.0.1:{PORT}/mcp", method="GET")
 try:
     urllib.request.urlopen(req); code = 200
 except urllib.error.HTTPError as e:

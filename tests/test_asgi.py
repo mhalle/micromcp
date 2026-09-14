@@ -3,6 +3,7 @@ inside Starlette with no WSGI bridge. Driven by the official mcp SDK client.
 """
 import asyncio, json, socket, threading, time
 from micromcp import MCP, ASGIServer
+from _helpers import free_port
 
 mcp = MCP("demo", "0.1.0")
 
@@ -81,9 +82,10 @@ async def concurrency_check(url):
 
 async def main():
     # 1. ASGIServer mounted directly under uvicorn
-    s1 = serve(asgi_app, 8601)
-    await exercise("http://127.0.0.1:8601/mcp", "ASGIServer direct under uvicorn")
-    await concurrency_check("http://127.0.0.1:8601/mcp")
+    p1 = free_port()
+    s1 = serve(asgi_app, p1)
+    await exercise(f"http://127.0.0.1:{p1}/mcp", "ASGIServer direct under uvicorn")
+    await concurrency_check(f"http://127.0.0.1:{p1}/mcp")
     s1.should_exit = True
 
     # 2. Mounted inside Starlette alongside ordinary routes — no WSGI bridge
@@ -95,8 +97,9 @@ async def main():
         return PlainTextResponse("a normal Starlette route")
 
     app = Starlette(routes=[Route("/", home), Mount("/mcp", app=asgi_app)])
-    s2 = serve(app, 8602)
-    await exercise("http://127.0.0.1:8602/mcp/", "mounted in Starlette (native ASGI)")
+    p2 = free_port()
+    s2 = serve(app, p2)
+    await exercise(f"http://127.0.0.1:{p2}/mcp/", "mounted in Starlette (native ASGI)")
     s2.should_exit = True
 
     print("\nASGI OK")
