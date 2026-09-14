@@ -17,8 +17,9 @@
 ## Unreleased (branch `apps-hypermedia`)
 
 ### MCP Apps
-- `Widget(name, body= | html=, scripts=, modules=, styles=, route=, fetch=,
-  csp=, border=)` declares a widget once; `@mcp.tool(widget=...)` registers
+- `Widget(name, body= | html=, scripts=, modules=, styles=, imports=, route=,
+  fetch=, csp=, border=)` declares a widget once (`imports=` writes an import
+  map, e.g. for three.js from a CDN); `@mcp.tool(widget=...)` registers
   its `ui://` resource on first use and fills in the tool's `_meta`
   (`ui.resourceUri` and the legacy `ui/resourceUri`). Assets are source
   text, `pathlib.Path`s (inlined), or https URLs (their origins declared in
@@ -38,8 +39,9 @@
 - Django: `django_routes(mcp, prefixes=)` serves Django views to widgets
   in process (prefix-confined, redirects followed, hypermedia headers
   forwarded, JSON bodies); `set_mcp_context(response, text, data)`.
-- Examples: `mcp_app_hypermedia.py` (todo widget with tools and with Django
-  views), `toolkit_lab.py` (nine self-testing toolkit variants and a
+- Examples: `mcp_app_3d.py` (a shared three.js scene the model builds and
+  the user selects in), `mcp_app_hypermedia.py` (todo widget with tools and
+  with Django views), `toolkit_lab.py` (nine self-testing toolkit variants and a
   model-context counter), `devhost.html` (a development MCP Apps host).
 - New suite `tests/test_apps.py`.
 
