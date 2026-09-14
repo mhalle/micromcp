@@ -140,7 +140,10 @@ it as `ui://<name>` with the MCP App MIME type and fills in the tool's
 resource's `_meta.ui.csp.resourceDomains` for you). Claude enforces that
 declaration: on 2026-09-14 htmx loaded from jsdelivr in a `Widget`, and the
 same page without the declaration was blocked (`script-src-elem`), exactly
-as in the dev host. `csp=` adds origins, `border=` sets `prefersBorder`,
+as in the dev host. `imports=` writes an import map, so modules can
+`import ... from "three"` (its origins are declared the same way; see
+`examples/mcp_app_3d.py`, a three.js scene the model builds with tools and the
+user selects in). `csp=` adds origins, `border=` sets `prefersBorder`,
 `route=` and `fetch=` are covered below.
 
 Under the hood a widget is a resource and a pointer to it, and both can be

@@ -280,7 +280,7 @@ def _script(source, module=False):
     return f"<script{kind}>{source}</script>"
 
 
-def _document(body, *, title, head, scripts, modules, styles, route, fetch):
+def _document(body, *, title, head, scripts, modules, styles, route, fetch, imports=None):
     """The widget page and the https origins it loads from."""
     if not isinstance(body, str):
         raise TypeError("body must be a str")
@@ -303,7 +303,19 @@ def _document(body, *, title, head, scripts, modules, styles, route, fetch):
             raise ValueError("an inlined style contains '</style'; it would end the tag early")
         else:
             parts.append(f"<style>{text}</style>")
-    parts += [head, _script(BRIDGE_JS)]
+    parts.append(head)
+    if imports:                                  # an import map, before any module script
+        if not isinstance(imports, dict):
+            raise TypeError("imports must map module specifiers to https URLs")
+        for spec, url in imports.items():
+            if not isinstance(spec, str) or not spec or not isinstance(url, str) \
+                    or not _HTTPS_RE.fullmatch(url):
+                raise ValueError(f"imports[{spec!r}] must be an https URL, got {url!r}")
+            u = urlsplit(url)
+            origins.add(f"{u.scheme}://{u.netloc}")
+        parts.append('<script type="importmap">'
+                     + json.dumps({"imports": imports}).replace("</", "<\\/") + "</script>")
+    parts.append(_script(BRIDGE_JS))
     for module, group in ((False, scripts), (True, modules)):
         for item in _items(group):
             text, origin = _asset(item, "module" if module else "script")
@@ -318,15 +330,17 @@ def _document(body, *, title, head, scripts, modules, styles, route, fetch):
 
 
 def page(body: str, *, title: str = "", head: str = "", scripts=(), modules=(), styles=(),
-         route: str | None = None, fetch: str = "hooks") -> str:
-    """A complete widget document around `body`: `styles`, `head`, `BRIDGE_JS`,
-    then `scripts` and `modules` in order. Each asset is source text, a
-    `pathlib.Path` (inlined), or an https URL (loaded; the host must allow its
-    origin — `Widget` declares that for you). `route` names the tool that
+         imports: dict | None = None, route: str | None = None, fetch: str = "hooks") -> str:
+    """A complete widget document around `body`: `styles`, `head`, the
+    `imports` map, `BRIDGE_JS`, then `scripts` and `modules` in order. Each
+    asset is source text, a `pathlib.Path` (inlined), or an https URL (loaded;
+    the host must allow its origin — `Widget` declares that for you).
+    `imports` maps module specifiers to https URLs (`{"three": ".../three.module.js"}`)
+    so modules can `import ... from "three"`. `route` names the tool that
     serves non-`tool:` URLs; `fetch="global"` lets libraries without a hook
     (Datastar) reach tools through `window.fetch`. Most code wants `Widget`."""
     return _document(body, title=title, head=head, scripts=scripts, modules=modules,
-                     styles=styles, route=route, fetch=fetch)[0]
+                     styles=styles, route=route, fetch=fetch, imports=imports)[0]
 
 
 class Widget:
@@ -338,9 +352,9 @@ class Widget:
 
     name     the resource is `ui://<name>` unless `uri=` says otherwise
     title    the page title and the resource title
-    body / scripts / modules / styles / head / route / fetch
-             build the page with `page()`; https URLs among the assets become
-             `csp.resourceDomains` entries automatically
+    body / scripts / modules / styles / imports / head / route / fetch
+             build the page with `page()`; https URLs among the assets and the
+             import map become `csp.resourceDomains` entries automatically
     html     a complete document used verbatim (bring your own bridge)
     csp      extra `_meta.ui.csp` origins: connectDomains, resourceDomains,
              frameDomains, baseUriDomains
@@ -353,7 +367,8 @@ class Widget:
 
     def __init__(self, name: str, *, body: str | None = None, html: str | None = None,
                  title: str = "", scripts=(), modules=(), styles=(), head: str = "",
-                 route: str | None = None, fetch: str = "hooks", csp: dict | None = None,
+                 imports: dict | None = None, route: str | None = None, fetch: str = "hooks",
+                 csp: dict | None = None,
                  border: bool | None = None, uri: str | None = None):
         if not isinstance(name, str) or not _WIDGET_NAME_RE.fullmatch(name):
             raise ValueError(f"widget name {name!r}: letters, digits, '.', '_' and '-' only")
@@ -365,7 +380,7 @@ class Widget:
             raise TypeError("Widget: give body= (a page built around the bridge) or html= "
                             "(a complete document of your own), not both")
         if html is not None:
-            if scripts or modules or styles or head or route or fetch != "hooks":
+            if scripts or modules or styles or head or imports or route or fetch != "hooks":
                 raise TypeError("Widget(html=...) is used verbatim; scripts/modules/styles/"
                                 "head/route/fetch apply only to body=")
             if not isinstance(html, str):
@@ -374,7 +389,7 @@ class Widget:
         else:
             self.html, origins = _document(body, title=self.title, head=head, scripts=scripts,
                                            modules=modules, styles=styles, route=route,
-                                           fetch=fetch)
+                                           fetch=fetch, imports=imports)
         domains = {}
         for k, v in (csp or {}).items():
             if k not in _CSP_KEYS:

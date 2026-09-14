@@ -265,6 +265,19 @@ check("resource meta: asset origins declared, csp merged, border set", w.meta,
       {"ui": {"csp": {"connectDomains": ["https://api.example.org"],
                       "resourceDomains": ["https://cdn.example.org", "https://esm.example.net"]},
               "prefersBorder": True}})
+wi = Widget("three", body="x", modules=["import * as T from 'three';"],
+            imports={"three": "https://cdn.example.org/three/three.module.js",
+                     "three/addons/": "https://cdn.example.org/three/jsm/"})
+check("imports= writes an import map before the modules",
+      0 < wi.html.index('<script type="importmap">{"imports": {"three": ')
+      < wi.html.index("<script type=\"module\">import * as T from 'three';</script>"), True)
+check("the import map's origins are declared", wi.meta,
+      {"ui": {"csp": {"resourceDomains": ["https://cdn.example.org"]}}})
+check("imports must be https URLs",
+      raises(lambda: Widget("x", body="x", imports={"three": "http://cdn.example.org/t.js"})),
+      "ValueError")
+check("imports must be a dict",
+      raises(lambda: Widget("x", body="x", imports=["three"]), TypeError), "TypeError")
 check("html= is used verbatim", Widget("own", html="<p>mine</p>").html, "<p>mine</p>")
 check("no csp and no border means no resource meta", Widget("plain", body="x").meta, None)
 for label, make, exc in [
