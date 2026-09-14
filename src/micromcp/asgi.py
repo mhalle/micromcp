@@ -38,26 +38,22 @@ class ASGIServer(_Core):
         names = [k.decode("latin-1").lower() for k, _ in scope.get("headers", [])]
         headers = {k.decode("latin-1").lower(): v.decode("latin-1")
                    for k, v in scope.get("headers", [])}
-        headers[":scheme"] = scope.get("scheme") or "http"
 
         async def reply(status, payload, extra=()):
             status, data = _encode(status, payload)
             hdrs = [(b"content-length", str(len(data)).encode())]
             if data:
                 hdrs.insert(0, (b"content-type", b"application/json"))
-            hdrs += [(k.lower().encode(), v.encode())
-                     for k, v in self.extra_headers(http_method, headers, status)]
-            hdrs += [(k.lower().encode(), v.encode()) for k, v in extra]
+            hdrs += [(k.lower().encode("latin-1"), v.encode("latin-1", "replace"))
+                     for k, v in self.extra_headers(http_method, headers, status, extra)]
             await send({"type": "http.response.start", "status": status, "headers": hdrs})
             await send({"type": "http.response.body", "body": data})
 
-        early = self.well_known(http_method, scope.get("path", "/"), headers)
-        if early is not None:
-            pass
-        elif not self.path_ok(scope.get("path", "/")):
+        early = self.reject_duplicates({n for n in names if names.count(n) > 1})
+        if early is None:
+            early = self.well_known(http_method, scope.get("path", "/"), headers)
+        if early is None and not self.path_ok(scope.get("path", "/")):
             early = _err(404, None, INVALID_REQUEST, "no MCP endpoint at this path")
-        else:
-            early = self.reject_duplicates({n for n in names if names.count(n) > 1})
         try:
             declared = int(headers.get("content-length") or 0)
         except ValueError:
@@ -75,7 +71,8 @@ class ASGIServer(_Core):
             chunk = msg.get("body", b"")
             size += len(chunk)
             if size > self.max_body:
-                return await reply(*self.too_large())   # do not drain the rest
+                tl = self.too_large()
+                return await reply(*tl, getattr(tl, "headers", ()))   # do not drain the rest
             chunks.append(chunk)
             more = msg.get("more_body", False)
         raw = b"".join(chunks)
@@ -102,11 +99,11 @@ class ASGIServer(_Core):
                 (b"cache-control", b"no-cache"),
                 # Tell nginx and friends not to buffer, or frames arrive in a lump.
                 (b"x-accel-buffering", b"no")]
-        hdrs += [(k.lower().encode(), v.encode())
+        hdrs += [(k.lower().encode("latin-1"), v.encode("latin-1", "replace"))
                  for k, v in self.extra_headers("POST", headers, 200)]
         await send({"type": "http.response.start", "status": 200, "headers": hdrs})
 
-        q, worker, stop = self.spawn(req)
+        q, worker, stop = self.spawn(req, headers)
 
         async def disconnected():
             while True:

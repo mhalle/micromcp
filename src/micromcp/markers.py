@@ -42,14 +42,16 @@ class Context:
     def client_capabilities(self) -> dict:
         """`_meta["io.modelcontextprotocol/clientCapabilities"]`, e.g. to check for
         `extensions["io.modelcontextprotocol/ui"]` and degrade to a text-only result."""
-        return dict(self._meta.get("io.modelcontextprotocol/clientCapabilities") or {})
+        caps = self._meta.get("io.modelcontextprotocol/clientCapabilities")
+        return dict(caps) if isinstance(caps, dict) else {}
 
     @property
     def client_info(self) -> dict:
         """`_meta["io.modelcontextprotocol/clientInfo"]` (name/version), when the
         client sent it; empty for a 2025-era client, whose identity travelled in
         an initialize this stateless server did not keep."""
-        return dict(self._meta.get("io.modelcontextprotocol/clientInfo") or {})
+        info = self._meta.get("io.modelcontextprotocol/clientInfo")
+        return dict(info) if isinstance(info, dict) else {}
 
     @property
     def streaming(self) -> bool:

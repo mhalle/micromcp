@@ -64,7 +64,6 @@ class Server(_Core):
         for k in ("CONTENT_TYPE", "CONTENT_LENGTH"):       # not HTTP_-prefixed in WSGI
             if environ.get(k):
                 headers[k.replace("_", "-").lower()] = environ[k]
-        headers[":scheme"] = environ.get("wsgi.url_scheme") or "http"
         http_method = environ.get("REQUEST_METHOD", "POST")
         full_path = (environ.get("SCRIPT_NAME", "") or "") + (environ.get("PATH_INFO", "") or "")
 
@@ -106,7 +105,6 @@ class Server(_Core):
         hdrs = [("Content-Length", str(len(data)))]
         if data:
             hdrs.insert(0, ("Content-Type", "application/json"))
-        hdrs += self.extra_headers(http_method, headers, status)
-        hdrs += list(getattr(reply, "headers", ()))
+        hdrs += self.extra_headers(http_method, headers, status, getattr(reply, "headers", ()))
         start_response(_STATUS.get(status, f"{status} Error"), hdrs)
         return [data]

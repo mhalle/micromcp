@@ -23,18 +23,28 @@ First packaged release. Same public API as the original single file:
 - `legacy="stateless"` (off by default) serves 2025-era clients per request
   and without sessions, the posture the official SDKs call stateless legacy
   serving: `initialize` answered from the registry, initialized `202`,
-  `ping`, unstamped results, GET/DELETE `405`. `server/discover` and the
-  `-32022` refusal then list both eras. Verified against the TypeScript SDK
-  2.0.0 client's default mode and the Python client's `mode="legacy"`.
+  `ping`, unstamped results stamped with the era served, GET/DELETE `405`.
+  `server/discover` and the `-32022` refusal then list both eras. Routing
+  headers sent by a legacy client must agree with the body. Verified against
+  the TypeScript SDK 2.0.0 client's default mode and the Python client's
+  `mode="legacy"`. `2025-03-26` is not served (it mandated batch arrays).
+- A posted JSON-RPC response is acknowledged with `202`; a null envelope
+  claim routes modern; SSE requires an explicit `text/event-stream` in
+  `Accept`; the `logging` capability is declared.
 - `ctx.client_info` exposes the envelope's client identity.
 
 ### Auth
 - `Unauthorized` (raise from `authenticate` or a handler) answers `401` with
   a sanitized `WWW-Authenticate: Bearer` challenge; `Unauthorized.invalid()`
-  is the `error="invalid_token"` form. `resource_metadata=` serves the RFC
-  9728 document at `/.well-known/oauth-protected-resource[<path>]` and fills
-  the challenge's URL in from the request's scheme and Host. The challenge
-  header is CORS-exposed. Error replies can now carry response headers.
+  is the `error="invalid_token"` form (raise it; an `Error` returned from
+  `authenticate` is treated as raised, never as a principal). Guards may raise
+  it. `resource_metadata=` serves the RFC 9728 document at
+  `/.well-known/oauth-protected-resource[<path>]` (GET/HEAD/OPTIONS, CORS `*`,
+  honoring `allowed_hosts`) and supplies the challenge URL, derived from the
+  document's `resource` rather than from `Host`. Challenge parameters and
+  every `Error` header are reduced to printable ASCII; exceptions are never
+  mutated. Error replies can carry response headers; a 401 raised after an
+  SSE stream opened is delivered in-band and logged.
 
 ### UI apps
 - `meta=` on tools, resources, templates, and prompts is validated at

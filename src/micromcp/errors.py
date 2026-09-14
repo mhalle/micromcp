@@ -2,7 +2,30 @@
 
 from __future__ import annotations
 
+import re
+
 from ._constants import UNAUTHORIZED
+
+_TOKEN_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")   # RFC 9110 token
+_MAX_HEADER_VALUE = 1024
+
+
+def _hval(v) -> str:
+    """A value safe inside a quoted-string header parameter: printable ASCII
+    only, no quote or backslash, bounded — so a caller-supplied scope can
+    never inject a header or put a byte on the wire that a server refuses
+    (control characters and non-ASCII crash or disconnect real containers)."""
+    s = "".join(ch for ch in str(v) if 0x20 <= ord(ch) < 0x7F and ch not in '"\\')
+    return s[:_MAX_HEADER_VALUE]
+
+
+def _header(name, value) -> tuple[str, str]:
+    """Validate one response header: a token name, and a value with no control
+    characters or non-ASCII (the transports encode latin-1; CR/LF would split)."""
+    if not isinstance(name, str) or not _TOKEN_RE.match(name):
+        raise ValueError(f"invalid header name {name!r}")
+    value = "".join(ch for ch in str(value) if 0x20 <= ord(ch) < 0x7F)
+    return name, value[:_MAX_HEADER_VALUE * 4]
 
 
 class Error(Exception):
@@ -10,30 +33,33 @@ class Error(Exception):
 
     def __init__(self, code, message, status=400, data=None, headers=None):
         self.code, self.message, self.status, self.data = code, message, status, data
-        self.headers = list(headers or [])       # extra response headers
-
-
-def _hval(v) -> str:
-    """A value safe inside a quoted-string header parameter: no quotes, no
-    line breaks, so a caller-supplied scope can never inject a header."""
-    return str(v).replace("\\", "").replace('"', "").replace("\r", "").replace("\n", "")
+        self.headers = [_header(k, v) for k, v in (headers or [])]   # extra response headers
 
 
 class Unauthorized(Error):
-    """Raise from `authenticate` (or a handler) to answer 401 with a
+    """Raise from `authenticate` (or a handler, or a guard) to answer 401 with a
     `WWW-Authenticate: Bearer ...` challenge, which is what makes an OAuth-capable
     client (Claude.ai, the Inspector, the SDKs) start its authorization flow.
 
         def authenticate(headers):
             token = headers.get("authorization", "").removeprefix("Bearer ")
             if not token:
-                raise Unauthorized(resource_metadata="https://api.example/.well-known/oauth-protected-resource")
-            return lookup(token) or Unauthorized.invalid()
+                raise Unauthorized(scope="read")
+            principal = store.lookup(token)
+            if principal is None:
+                raise Unauthorized.invalid()
+            return principal
 
     `resource_metadata` is the RFC 9728 document URL. Leave it out on a server
-    built with `resource_metadata=`: the server fills in its own well-known URL
-    from the request's Host. `scope`, `error` ("invalid_token",
+    built with `resource_metadata=`: the server derives its own well-known URL
+    from that document's `resource`. `scope`, `error` ("invalid_token",
     "insufficient_scope") and `error_description` are the RFC 6750 parameters.
+    Every parameter is reduced to printable ASCII before it reaches a header.
+
+    Raising inside a tool that streams (a `Context` tool answered over SSE)
+    cannot change the HTTP status any more: the error travels in-band as a
+    `-32001` frame without the challenge. Authenticate and guard before the
+    stream opens; both run before any byte is committed.
     """
 
     def __init__(self, message="Authentication required", *, resource_metadata=None,
@@ -45,17 +71,24 @@ class Unauthorized(Error):
 
     @classmethod
     def invalid(cls, description="The access token is invalid or expired", **k):
+        """The `error="invalid_token"` form. Raise it; do not return it."""
         return cls("Invalid token", error="invalid_token", error_description=description, **k)
 
-    def refresh(self):
-        """Rebuild the challenge header from the fields (after the server fills
-        in a default `resource_metadata`)."""
-        attrs = [(k, v) for k, v in (("resource_metadata", self.resource_metadata),
-                                     ("scope", self.scope), ("error", self.error),
+    def challenge(self, default_resource_metadata=None) -> list[tuple[str, str]]:
+        """The `WWW-Authenticate` header for this error, as a fresh list. Pure:
+        an instance can be shared or module-level without one request's
+        default leaking into the next."""
+        url = self.resource_metadata or default_resource_metadata
+        attrs = [(k, v) for k, v in (("resource_metadata", url), ("scope", self.scope),
+                                     ("error", self.error),
                                      ("error_description", self.error_description)) if v]
-        challenge = "Bearer" + (" " + ", ".join(f'{k}="{_hval(v)}"' for k, v in attrs)
-                                if attrs else "")
-        self.headers = [("WWW-Authenticate", challenge)]
+        value = "Bearer" + (" " + ", ".join(f'{k}="{_hval(v)}"' for k, v in attrs)
+                            if attrs else "")
+        return [("WWW-Authenticate", value)]
+
+    def refresh(self):
+        """Recompute `headers` from the fields (after changing one)."""
+        self.headers = self.challenge()
         return self
 
 

@@ -104,10 +104,17 @@ def _is_async(fn) -> bool:
             or inspect.iscoroutinefunction(getattr(fn, "__call__", None)))  # noqa: B004
 
 
-def _allowed(entry, principal) -> bool:
-    """Evaluate an entry's guards. A guard that raises denies (fail closed)."""
+def _allowed(entry, principal, strict=False) -> bool:
+    """Evaluate an entry's guards. A guard that raises denies (fail closed).
+    When the entry is being invoked (`strict`), a guard that raises an
+    `Error` such as `Unauthorized` chooses the answer instead — a 401 with its
+    challenge; in a listing the entry is simply hidden."""
     try:
         return all(g(principal) for g in entry.get("_guards", ()))
+    except Error:
+        if strict:
+            raise
+        return False
     except Exception:
         log.exception("guard for %r raised; denying", entry.get("name"))
         return False

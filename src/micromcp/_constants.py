@@ -15,8 +15,9 @@ META_SUB = "io.modelcontextprotocol/subscriptionId"
 META_CLIENT = "io.modelcontextprotocol/clientInfo"
 # Handshake-era revisions served, per request and without sessions, when a
 # server is built with legacy="stateless". Newest first: it is the answer to
-# an initialize naming a version we do not know.
-LEGACY_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
+# an initialize naming a version we do not know. 2025-03-26 is not listed:
+# it mandated JSON-RPC batch arrays, which this server refuses.
+LEGACY_VERSIONS = ("2025-11-25", "2025-06-18")
 WELL_KNOWN = "/.well-known/oauth-protected-resource"   # RFC 9728
 
 # JSON-RPC / MCP error codes

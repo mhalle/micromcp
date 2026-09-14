@@ -19,10 +19,12 @@ import queue
 import re
 import threading
 
+from urllib.parse import urlsplit
+
 from ._constants import (
     CANCEL_GRACE, CORS_HEADERS, HANDSHAKE_METHODS, HEADER_MISMATCH, INTERNAL_ERROR,
     INVALID_PARAMS, INVALID_REQUEST, KEEPALIVE, LIST_METHODS, MAX_BODY, MAX_URI,
-    LEGACY_VERSIONS, META_CAPS, META_SERVER, META_SUB, META_VER, METHOD_NOT_FOUND,
+    LEGACY_VERSIONS, META_CAPS, META_CLIENT, META_SERVER, META_SUB, META_VER, METHOD_NOT_FOUND,
     OFFLOAD_BYTES, PARSE_ERROR, PROTOCOL, QUEUE_SIZE, ROUTING_HEADERS, SINGLETON_HEADERS,
     STREAM_BUDGET, UNSUPPORTED_VERSION, WELL_KNOWN, WORKERS, log,
 )
@@ -330,12 +332,25 @@ class _Core:
                  legacy=None, resource_metadata=None):
         if legacy not in (None, "stateless"):
             raise ValueError('legacy must be None or "stateless"')
+        self.metadata_url = None
         if resource_metadata is not None:
             if not isinstance(resource_metadata, dict):
                 raise TypeError("resource_metadata must be a dict (RFC 9728 document)")
             json.dumps(resource_metadata, allow_nan=False)   # fail at construction, not on GET
+            res = resource_metadata.get("resource")
+            u = urlsplit(res) if isinstance(res, str) else None
+            if not u or u.scheme not in ("http", "https") or not u.netloc or u.query \
+                    or u.fragment or any(ord(c) < 0x21 or ord(c) > 0x7E for c in res):
+                raise ValueError("resource_metadata['resource'] must be an absolute http(s) "
+                                 "URL without query or fragment (RFC 9728)")
+            # RFC 9728 §3: the metadata URL is the resource's origin plus the
+            # well-known path plus the resource's path. Derived from the
+            # operator's own configuration — never from Host or a proxy header.
+            self.metadata_url = (f"{u.scheme}://{u.netloc}{WELL_KNOWN}"
+                                 f"{_norm_path(u.path) if u.path not in ('', '/') else ''}")
         self.legacy = legacy
         self.resource_metadata = copy.deepcopy(resource_metadata)
+        self._warned_bare = False
         self.mcp = mcp
         self.allowed_origins = set(allowed_origins)
         self.allowed_hosts = {h.lower() for h in allowed_hosts}
@@ -378,9 +393,18 @@ class _Core:
         return (not self.allowed_hosts or host in self.allowed_hosts
                 or host.rsplit(":", 1)[0] in self.allowed_hosts)
 
-    def extra_headers(self, http_method, headers, status) -> list[tuple[str, str]]:
+    def extra_headers(self, http_method, headers, status, reply_headers=()) -> list:
         """Headers every response carries: protocol version, Allow on 405,
-        CORS, and Connection: close on a 413 whose body we will not read."""
+        CORS, and Connection: close on a 413 whose body we will not read.
+        `reply_headers` (an answer's own, e.g. a challenge or a legacy
+        version stamp) are merged in and win on a name clash."""
+        out = self._base_headers(http_method, headers, status)
+        if reply_headers:
+            override = {k.lower() for k, _ in reply_headers}
+            out = [(k, v) for k, v in out if k.lower() not in override] + list(reply_headers)
+        return out
+
+    def _base_headers(self, http_method, headers, status) -> list[tuple[str, str]]:
         out = [("MCP-Protocol-Version", PROTOCOL)]
         if status == 405:
             out.append(("Allow", "POST, OPTIONS"))
@@ -409,14 +433,21 @@ class _Core:
             return None
         if _norm_path(path) not in (WELL_KNOWN, WELL_KNOWN + (self.path or "")):
             return None
+        if not self._host_ok(headers):            # DNS-rebinding guard applies here too
+            return _err(403, None, HEADER_MISMATCH, "Host not allowed")
+        # Readable from any origin: RFC 9728 clients fetch it cross-site, with
+        # no credentials. These win over the endpoint's own CORS answers.
+        cors = [("Access-Control-Allow-Origin", "*"),
+                ("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS"),
+                ("Access-Control-Allow-Headers", "Accept"),
+                ("Access-Control-Max-Age", "600")]
         if http_method == "OPTIONS":
-            return _Reply(204, None)
-        if http_method != "GET":
-            return _err(405, None, INVALID_REQUEST, "GET only")
-        origin = headers.get("origin")
-        cors = [] if origin and origin in self.allowed_origins else \
-            [("Access-Control-Allow-Origin", "*")]
-        return _Reply(200, copy.deepcopy(self.resource_metadata), cors)
+            return _Reply(204, None, cors)
+        if http_method not in ("GET", "HEAD"):
+            return _err(405, None, INVALID_REQUEST, "GET only",
+                        headers=[("Allow", "GET, HEAD, OPTIONS")])
+        doc = copy.deepcopy(self.resource_metadata) if http_method == "GET" else None
+        return _Reply(200, doc, cors)
 
     def _supported(self) -> list:
         return [PROTOCOL, *LEGACY_VERSIONS] if self.legacy else [PROTOCOL]
@@ -424,7 +455,8 @@ class _Core:
     def _capabilities(self) -> dict:
         return {"tools": {"listChanged": False},
                 "resources": {"subscribe": False, "listChanged": False},
-                "prompts": {"listChanged": False}}
+                "prompts": {"listChanged": False},
+                "logging": {}}      # notifications/message on a streamed call
 
     def reject_duplicates(self, names):
         """Early answer for repeated headers that identify the caller or route
@@ -477,9 +509,11 @@ class _Core:
         if meta is not None and not isinstance(meta, dict):
             raise Error(INVALID_PARAMS, "params._meta must be an object")
 
-        claim = meta.get(META_VER) if meta else None
-        if self.legacy and claim is None and ver != PROTOCOL:
-            self._validate_legacy(ver, method, params)
+        # A PRESENT claim key routes modern, whatever its value (a null claim
+        # is a malformed modern request, not a legacy one), as the SDK does.
+        claimed = meta is not None and META_VER in meta
+        if self.legacy and not claimed and ver != PROTOCOL:
+            self._validate_legacy(ver, method, params, headers)
             era = "legacy"
         else:
             self._validate_modern(ver, method, headers, meta)
@@ -488,6 +522,9 @@ class _Core:
         token = (meta or {}).get("progressToken")
         if token is not None and (isinstance(token, bool) or not isinstance(token, (str, int))):
             raise Error(INVALID_PARAMS, "_meta.progressToken must be a string or integer")
+        info = (meta or {}).get(META_CLIENT)
+        if info is not None and not isinstance(info, dict):
+            raise Error(INVALID_PARAMS, f"_meta.{META_CLIENT} must be an object")
 
         if method in ("tools/call", "resources/read", "prompts/get"):
             # Bind the header to the field this method actually dispatches on;
@@ -499,7 +536,11 @@ class _Core:
                     raise Error(INVALID_PARAMS, f"params.{field} must be a string")
                 if len(want) > MAX_URI:
                     raise Error(INVALID_PARAMS, f"params.{field} is too long")
-                if era == "modern" and _decode_hdr(headers.get("mcp-name")) != want:
+                # Modern requests must carry the binding; a legacy request
+                # need not, but one that does must agree with its body, so a
+                # gateway routing on the header cannot be shown a decoy.
+                if (era == "modern" or "mcp-name" in headers) \
+                        and _decode_hdr(headers.get("mcp-name")) != want:
                     raise Error(HEADER_MISMATCH,
                                 f"Mcp-Name header does not match body value {want!r}")
             args = params.get("arguments")
@@ -553,25 +594,31 @@ class _Core:
             raise Error(UNSUPPORTED_VERSION,
                         f"unsupported protocol version {ver!r}",
                         data={"supported": self._supported(), "requested": ver})
-        if META_CAPS not in meta:
-            raise Error(INVALID_PARAMS, f"request _meta missing {META_CAPS}")
+        if not isinstance(meta.get(META_CAPS), dict):
+            raise Error(INVALID_PARAMS, f"request _meta missing {META_CAPS} (an object)")
         # Mcp-Method is compared verbatim (as the SDK does); only Mcp-Name
         # carries the base64 sentinel.
         if headers.get("mcp-method") != method:
             raise Error(HEADER_MISMATCH, "Mcp-Method header does not match body method")
 
-    def _validate_legacy(self, ver, method, params):
+    def _validate_legacy(self, ver, method, params, headers):
         """The 2025-era rungs: the version header, when present, must name a
-        revision we serve (an absent one means 2025-03-26, per the spec), and
-        `initialize` must be well-formed. No routing headers, no envelope."""
+        revision we serve (an absent one is tolerated, per the spec's
+        backwards-compatibility note), `initialize` must be well-formed, and
+        routing headers, while not required of a 2025 client, must agree with
+        the body when they are sent."""
         if ver is not None and ver not in LEGACY_VERSIONS:
             raise Error(UNSUPPORTED_VERSION, f"unsupported protocol version {ver!r}",
                         data={"supported": self._supported(), "requested": ver})
+        if "mcp-method" in headers and headers["mcp-method"] != method:
+            raise Error(HEADER_MISMATCH, "Mcp-Method header does not match body method")
+        if method == "notifications/initialized":
+            raise Error(INVALID_REQUEST, "Invalid Request: a notification must not carry an id")
         if method == "initialize":
             if not isinstance(params.get("protocolVersion"), str):
                 raise Error(INVALID_PARAMS, "params.protocolVersion must be a string")
             for key in ("capabilities", "clientInfo"):
-                if key in params and not isinstance(params[key], dict):
+                if not isinstance(params.get(key), dict):
                     raise Error(INVALID_PARAMS, f"params.{key} must be an object")
 
     def _legacy_open(self, method, params):
@@ -590,7 +637,7 @@ class _Core:
         would otherwise stream. Returns the kwargs the handler will receive,
         or None when the tool is unknown/denied (dispatch answers those)."""
         entry = self.mcp.tools.get(params.get("name"))
-        if not entry or not _allowed(entry, principal):
+        if not entry or not _allowed(entry, principal, strict=True):
             return None
         name, kwargs = entry["name"], dict(params.get("arguments") or {})
         problem = (await self.offload(_check, kwargs, entry["inputSchema"]) if big
@@ -668,7 +715,7 @@ class _Core:
             entry = m.tools.get(name)
             if not entry:
                 raise Error(METHOD_NOT_FOUND, f"no such tool {name!r}", 404)
-            if not _allowed(entry, principal):
+            if not _allowed(entry, principal, strict=True):
                 # Tool-level failures are in-band results, not JSON-RPC errors.
                 return {"content": [{"type": "text",
                                      "text": f"Permission denied for tool {name!r}"}],
@@ -695,7 +742,7 @@ class _Core:
         if method == "resources/read":
             uri = params.get("uri")
             entry, raw = m._match(uri or "")
-            if not entry or not _allowed(entry, principal):
+            if not entry or not _allowed(entry, principal, strict=True):
                 raise Error(METHOD_NOT_FOUND, f"no such resource {uri!r}", 404)
             kwargs = m.coerce_params(entry, uri, raw)   # after the guard: -32602 reveals it
             inject(entry, kwargs)
@@ -718,7 +765,7 @@ class _Core:
         if method == "prompts/get":
             name = params.get("name")
             entry = m.prompts.get(name)
-            if not entry or not _allowed(entry, principal):
+            if not entry or not _allowed(entry, principal, strict=True):
                 raise Error(METHOD_NOT_FOUND, f"no such prompt {name!r}", 404)
             args = dict(params.get("arguments") or {})
             declared = {a["name"] for a in entry["arguments"]}
@@ -789,6 +836,10 @@ class _Core:
             if not isinstance(body, dict):
                 return _err(400, None, INVALID_REQUEST,
                             "Invalid Request: body must be a single JSON-RPC object"), None
+            if "method" not in body and ("result" in body or "error" in body):
+                # A posted JSON-RPC response. This server never sends requests,
+                # so there is nothing it can answer; the transport spec says 202.
+                return (202, None), None
             if "id" not in body:
                 # A notification. Acknowledge it and do NOT dispatch: notifications
                 # get no response, and a side-effecting tool must not run without
@@ -805,6 +856,11 @@ class _Core:
                     principal = await self.authenticate(headers)
                 else:
                     principal = await self.offload(self.authenticate, headers, aux=True)
+                if isinstance(principal, Error):
+                    raise principal          # `return Unauthorized(...)` means raise, never "allow"
+                if isinstance(principal, BaseException):
+                    log.error("authenticate returned an exception object %r; refusing", principal)
+                    raise Error(INTERNAL_ERROR, "Internal error", 500)
             bound = (await self._bind_call(params, principal, big)
                      if method == "tools/call" else None)
         except Error as e:
@@ -814,19 +870,20 @@ class _Core:
             return _err(500, rid, INTERNAL_ERROR, "Internal error"), None
         return None, (method, params, principal, rid, bound, era)
 
-    def _error_reply(self, e, rid, headers):
-        """An Error as a reply. An `Unauthorized` without a challenge URL gets
-        this server's own well-known document, when one is configured."""
-        if isinstance(e, Unauthorized) and e.resource_metadata is None \
-                and self.resource_metadata is not None and headers.get("host"):
-            # The transport records its scheme under ":scheme" (not a legal
-            # header name, so it cannot be spoofed); a proxy's forwarded
-            # scheme wins, since that is the URL the client actually used.
-            scheme = (headers.get("x-forwarded-proto") or headers.get(":scheme")
-                      or "https").split(",")[0].strip() or "https"
-            e.resource_metadata = f"{scheme}://{headers['host']}{WELL_KNOWN}{self.path or ''}"
-            e.refresh()
-        return _err(e.status, rid, e.code, e.message, e.data, headers=e.headers)
+    def _error_reply(self, e, rid, headers=None):
+        """An Error as a reply. An `Unauthorized` without its own challenge URL
+        names this server's well-known document, derived at construction from
+        `resource_metadata["resource"]`; the exception is never mutated, so a
+        shared instance cannot carry one caller's data to the next."""
+        hdrs = e.headers
+        if isinstance(e, Unauthorized):
+            hdrs = e.challenge(self.metadata_url)
+            if not (e.resource_metadata or self.metadata_url) and not self._warned_bare:
+                self._warned_bare = True
+                log.warning("401 challenge carries no resource_metadata URL: pass "
+                            "resource_metadata= to the server (or to Unauthorized); "
+                            "MCP clients cannot start OAuth from a bare challenge")
+        return _err(e.status, rid, e.code, e.message, e.data, headers=hdrs)
 
     async def respond(self, req, emit=None, stop=None, headers=None):
         """Dispatch a prepared request. Returns (status_code, payload)."""
@@ -843,7 +900,11 @@ class _Core:
                     result = await self._dispatch(method, params, principal, emit, stop, bound)
                 # A 2025-era result: no resultType/ttlMs/cacheScope, and the
                 # server identifies itself in initialize, not in every _meta.
-                return _Reply(200, {"jsonrpc": "2.0", "id": rid, "result": result})
+                # The response names the era actually served.
+                served = (result.get("protocolVersion") if method == "initialize"
+                          else (headers or {}).get("mcp-protocol-version") or LEGACY_VERSIONS[0])
+                return _Reply(200, {"jsonrpc": "2.0", "id": rid, "result": result},
+                              [("MCP-Protocol-Version", served)])
             if method == "subscriptions/listen":
                 result = await self._listen(rid, emit)
             else:
@@ -901,18 +962,27 @@ class _Core:
         Decided only after `prepare` succeeded — once an SSE stream is open
         there is no way back to a JSON error response with the right status."""
         method, params = req[0], req[1]
-        if not _accepts(headers, "text/event-stream"):
+        era = req[5] if len(req) > 5 else "modern"
+        # An explicit opt-in only: an absent or wildcard Accept must not put a
+        # `data:`-prefixed body in front of a JSON-only client.
+        if "text/event-stream" not in (headers.get("accept") or "").lower():
             return False
         if method == "subscriptions/listen":
-            return True
+            return era == "modern"
         if method != "tools/call":
             return False
         entry = self.mcp.tools.get(params.get("name"))
         return bool(entry and entry.get("_context"))
 
-    def spawn(self, req):
+    def spawn(self, req, headers=None):
         """Start `req` on a task that feeds SSE frames (bytes) into a bounded
-        queue; None is the end-of-stream sentinel. Returns (queue, worker, stop)."""
+        queue; None is the end-of-stream sentinel. Returns (queue, worker, stop).
+
+        The response head is already committed as 200 SSE when the handler
+        runs, so an `Error` it raises travels in-band as an error frame: its
+        HTTP status and headers (a 401 challenge, a 503) cannot be expressed.
+        Authentication and guards run before the stream opens; that is where
+        those answers belong."""
         q: asyncio.Queue = asyncio.Queue(maxsize=self.queue_size)
         stop = threading.Event()
         sent = [0]
@@ -931,7 +1001,11 @@ class _Core:
 
         async def run():
             try:
-                _status, payload = await self.respond(req, emit=emit, stop=stop)
+                status, payload = await self.respond(req, emit=emit, stop=stop, headers=headers)
+                if status != 200:
+                    log.warning("streamed %r ended with HTTP %s; delivered in-band, "
+                                "its status and headers cannot reach the client",
+                                req[1].get("name") or req[0], status)
                 await q.put(b"data: " + _encode(200, payload)[1] + b"\n\n")
             finally:
                 await q.put(None)
@@ -951,11 +1025,11 @@ class _Core:
             log.warning("handler for %r ignored cancellation and is still running",
                         req[1].get("name"))
 
-    async def frames(self, req):
+    async def frames(self, req, headers=None):
         """Async generator of SSE bytes for a validated streaming request, with
         keepalive comments during silence. Closing the generator cancels the
         handler. Used by adapters that stream but have no ASGI receive channel."""
-        q, worker, stop = self.spawn(req)
+        q, worker, stop = self.spawn(req, headers)
         try:
             while True:
                 try:

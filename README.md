@@ -277,9 +277,15 @@ handler) and the answer is `401` with a `WWW-Authenticate: Bearer` challenge,
 which is what makes an OAuth-capable client (Claude.ai, the Inspector, the
 SDKs) start its flow. Pass `resource_metadata=` to serve the RFC 9728
 document at `/.well-known/oauth-protected-resource` (and at the
-path-suffixed form when `path=` is set); the challenge then names that URL
-by default, built from the request's scheme and `Host` (a proxy's
-`X-Forwarded-Proto` wins).
+path-suffixed form when `path=` is set); the challenge then names that
+document's URL by default, derived at construction from the document's own
+`resource` (its origin plus the well-known path plus its path), never from
+`Host` or a proxy header. A challenge with no URL at all is logged once as a
+warning: MCP clients cannot start OAuth from a bare `Bearer`. Guards may
+raise `Unauthorized` too, and do so before any byte is committed. A tool that
+raises it after its SSE stream has opened cannot change the status any more;
+the error travels in-band, which is why authentication and guards are the
+place for it.
 
 ```python
 from micromcp import Unauthorized
@@ -288,7 +294,10 @@ def authenticate(headers):
     token = headers.get("authorization", "").removeprefix("Bearer ")
     if not token:
         raise Unauthorized(scope="read")                 # start the OAuth flow
-    return store.lookup(token) or Unauthorized.invalid()  # error="invalid_token"
+    principal = store.lookup(token)
+    if principal is None:
+        raise Unauthorized.invalid()                     # error="invalid_token"
+    return principal
 
 app = ASGIServer(mcp, authenticate=authenticate, path="/mcp",
                  resource_metadata={"resource": "https://mcp.example.com/mcp",
@@ -374,13 +383,20 @@ on `ASGIServer`) serves 2025-era clients the way the official SDKs' stateless
 legacy mode does: per request, with no sessions. A request without the
 per-request envelope is answered on the 2025 ladder: `initialize` returns the
 capabilities and server identity from the registry every time (echoing a
-requested `2025-11-25`, `2025-06-18`, or `2025-03-26`; anything else gets
-`2025-11-25`), the initialized notification is `202`, `ping` is `{}`, results
-carry no `resultType`/`ttlMs`/`cacheScope`, and GET and DELETE stay `405`.
-Routing headers and the envelope are not required of such requests; a
-`Context` tool still streams SSE with its progress notifications. A request
-that names `2026-07-28` in its header or envelope always takes the modern
-ladder, and `server/discover` then advertises both eras. Verified with the
+requested `2025-11-25` or `2025-06-18`; anything else, including
+`2025-03-26`, whose batch arrays this server refuses, gets `2025-11-25`), the
+initialized notification is `202`, `ping` is `{}`, results carry no
+`resultType`/`ttlMs`/`cacheScope`, responses name the era served in
+`MCP-Protocol-Version`, and GET and DELETE stay `405`. The envelope and the
+`Mcp-Method`/`Mcp-Name` routing headers are not required of such requests,
+but when a legacy request does send them they must agree with the body. Note
+for gateways that authorize on `Mcp-Name`: a claim-less request carries no
+such header at all, so a gateway must deny claim-less POSTs if it relies on
+the header rather than the body. A `Context` tool still streams SSE with its
+progress notifications, but only to a client whose `Accept` names
+`text/event-stream` explicitly. A request that names `2026-07-28` in its
+header or envelope (even with a null value) always takes the modern ladder,
+and `server/discover` then advertises both eras. Verified with the
 Python `mcp` 2.x client in both `mode="legacy"` and `mode="auto"` (which
 still picks the modern era), the TypeScript SDK 2.0.0 client in its default
 legacy mode, and the Go SDK 1.7.0 client. The default stays refuse: turning
@@ -412,7 +428,7 @@ conform.py          11 checks against the strict mcp-types wire schema
 interop.py          end-to-end with the official mcp client, 9 assertions
 test_asgi.py        native ASGI under uvicorn and mounted in Starlette
 test_progress.py    40 SSE checks: ordering, cancellation, subscriptions/listen, WSGI degradation
-test_legacy.py      71 checks: legacy="stateless" serving, OAuth handoff, both transports
+test_legacy.py      99 checks: legacy="stateless" serving, OAuth handoff, review fixes, both transports
 harnesses.py        wsgiref, Flask, Starlette, waitress, gunicorn
 ergonomics.py       API tour, 12 assertions
 test_hardening.py   247 regression checks from four adversarial reviews + UI apps
