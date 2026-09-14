@@ -21,6 +21,7 @@ HERE = pathlib.Path(__file__).parent
 SUITES = [
     ("test_micromcp.py", ["unit"], 120),
     ("ergonomics.py", ["unit"], 60),
+    ("test_apps.py", ["unit"], 60),
     ("conform.py", ["conform"], 60),
     ("interop.py", ["interop", "server"], 120),
     ("test_asgi.py", ["interop", "server"], 180),

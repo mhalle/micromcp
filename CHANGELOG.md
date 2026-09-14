@@ -14,6 +14,28 @@
   `from micromcp import *` no longer brings them in) and are documented in
   the README's new "Constants" section.
 
+## Unreleased (branch `apps-hypermedia`)
+
+### MCP Apps
+- `@mcp.tool(visibility="app" | "model" | [...])` publishes
+  `_meta.ui.visibility`; app-only tools are hidden from the model by the host
+  and callable by the server's widgets.
+- `micromcp.apps`: `page()` builds a static widget with `BRIDGE_JS` inlined
+  (MCP Apps 2026-01-26 handshake, ping/teardown, theme, resize,
+  `mcp.callTool`, and `mcp.fetch`, a `fetch()`-shaped tool-call transport
+  wired into htmx 4 and fixi); `fragment(html, status=, context=)` returns
+  HTML for the widget to swap in.
+- Model context: `fragment(context=)` and `mcp.setContext()` send
+  `ui/update-model-context` (text plus data as a labeled JSON block);
+  `mcp.say()` and `data-mcp-say` send `ui/message`.
+- Django: `django_routes(mcp, prefixes=)` serves Django views to widgets
+  in process (prefix-confined, redirects followed, hypermedia headers
+  forwarded, JSON bodies); `set_mcp_context(response, text, data)`.
+- Examples: `mcp_app_hypermedia.py` (todo widget with tools and with Django
+  views), `toolkit_lab.py` (nine self-testing toolkit variants and a
+  model-context counter), `devhost.html` (a development MCP Apps host).
+- New suite `tests/test_apps.py`.
+
 ## 0.1.0 — 2026-09-14 (tagged; not yet on PyPI)
 
 First packaged release. Same public API as the original single file:
