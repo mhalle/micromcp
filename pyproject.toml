@@ -83,3 +83,5 @@ ignore = ["E731"]
 [tool.ruff.lint.per-file-ignores]
 # The suites are deliberately dense scripts; keep the F/B classes that catch real bugs.
 "tests/*" = ["E401", "E402", "E501", "E701", "E702", "E741", "B006", "B007", "B008", "B011", "B017", "B018", "B020", "B023", "B905", "UP"]
+# Examples embed HTML/JS in strings; line length is not a signal there.
+"examples/*" = ["E401", "E501", "E702"]

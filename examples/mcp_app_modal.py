@@ -28,7 +28,8 @@ app = modal.App("micromcp-ui")
 @app.function(image=image, min_containers=1, timeout=600)
 @modal.asgi_app()
 def web():
-    import json, sys, time
+    import json
+    import time
     from micromcp import MCP, ASGIServer, embedded_resource
 
     mcp = MCP("newton-civic-ui", "0.1.0")
