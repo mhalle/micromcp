@@ -144,6 +144,14 @@ render; a `blob=` makes it base64. A declared `outputSchema` still requires
 `structuredContent`. Everything the iframe does afterwards arrives as
 ordinary `tools/call` requests through the host.
 
+Verified 2026-09-14 in the Claude desktop chat via a custom connector
+(`examples/mcp_app_modal.py`, deployed on Modal): the host prefetches the
+`ui://` widget, calls the tool, delivers the result to the iframe, and renders
+it. Two host behaviors worth knowing: the connector validator negotiates by
+sending `initialize`, taking the `-32022` refusal, and retrying with
+`server/discover`; and the host caches a connector's widget after its first
+fetch, so a changed widget needs a new connector identity to be picked up.
+
 ## Injected parameters
 
 Two annotations are filled server-side and excluded from the input schema, so
