@@ -279,6 +279,52 @@ array of blocks (the spec shows one block), so the bridge tries that first.
 None of this happens in the Claude Code desktop tab, which does not render MCP
 Apps. Treat context as data: anything users wrote reaches the model.
 
+### Channels: pushing to open widgets
+
+A widget cannot open a socket, and the host delivers a tool result only to the
+widget that call opened, so changes made elsewhere — by the model, by another
+user — need a way in. A channel is that way in, with the WebSocket API on the
+widget's side:
+
+```python
+scene = mcp.channel("scene")
+
+@scene.on_connect
+def joined(conn):                        # conn.params: the query the widget connected with
+    conn.send_json(snapshot())
+
+@scene.on_message
+def received(conn, text): ...            # text frames, in order
+
+@mcp.tool
+def scene_add(...) -> str:
+    ...
+    scene.broadcast_json(snapshot())     # from any tool, sync or async, any thread
+```
+
+```js
+const ws = mcp.channel("scene");         // WebSocket-compatible: onmessage, send, close, readyState
+ws.onmessage = e => render(JSON.parse(e.data));
+
+new SomeClient("mcp:scene?partial=1", {webSocket: mcp.WebSocket});   // for libraries that take one
+```
+
+Underneath are four app-only tools shared by every channel: `channel_open`,
+`channel_send`, `channel_recv`, and `channel_close`. `channel_recv` is a long
+poll: it returns as soon as a frame is queued, or after `wait` seconds (20 by
+default), so an idle widget makes one request per 20 s and a change arrives at
+once. A connection is bound to the principal that opened it (`guards=` run on
+open), is dropped after `idle` seconds without a request (90), and is closed if
+it falls `max_queue` frames behind (1000). Callbacks may be sync (run on a
+worker thread) or async, and `send`/`broadcast` are safe from any thread.
+
+Verified 2026-09-14 in the Claude chat: the host held `channel_recv`-style
+requests open for the full 20 s, and a model edit reached an open widget as
+soon as it was made. That test used atomdoc, a server-authoritative document
+library whose Python transport interface maps onto a channel and whose
+TypeScript client takes `mcp.WebSocket` unchanged; the same pattern drives
+`examples/mcp_app_3d.py`.
+
 ### The dev host
 
 `examples/devhost.html` is a stand-in MCP Apps host for development: it reads

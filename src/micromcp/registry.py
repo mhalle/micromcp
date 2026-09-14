@@ -139,6 +139,20 @@ class MCP:
         self.resources: dict[str, dict] = {}
         self.templates: dict[str, dict] = {}
         self.prompts: dict[str, dict] = {}
+        self.channels: dict[str, object] = {}
+
+    def channel(self, name: str, **options):
+        """A named WebSocket-style channel between this server's widgets and its code: see
+        `micromcp.Channel` (options: guards, wait, idle, max_queue). The first channel also
+        registers the app-only `channel_open/send/recv/close` tools every channel shares."""
+        from .apps import Channel, _channel_tools
+        if name in self.channels:
+            raise ValueError(f"channel {name!r} is already registered")
+        channel = Channel(name, **options)
+        if not self.channels:
+            _channel_tools(self)
+        self.channels[name] = channel
+        return channel
 
     def tool(self, fn=None, *, name=None, title=None, guards=(),
              annotations=None, output_schema=None, read_only=None,
