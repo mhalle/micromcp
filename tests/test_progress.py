@@ -161,6 +161,53 @@ async def main():
     check("SDK client got result", r.structured_content, {"processed": 4})
     check("SDK client got progress", len(seen), 4)
 
+    print("\n— subscriptions/listen closes gracefully —")
+    from micromcp._constants import META_SUB
+
+    def listen_body(rid, subs):
+        return {"jsonrpc": "2.0", "id": rid, "method": "subscriptions/listen",
+                "params": {"_meta": {META_VER: PROTOCOL, META_CAPS: {}},
+                           "notifications": subs}}
+    LH = {"Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream",
+          "MCP-Protocol-Version": PROTOCOL, "Mcp-Method": "subscriptions/listen"}
+    frames = []
+    async with httpx.AsyncClient(timeout=10) as c:
+        async with c.stream("POST", url, headers=LH,
+                            json=listen_body("sub-1", {"toolsListChanged": True,
+                                                       "resourceSubscriptions": ["x://y"]})) as r:
+            ctype = r.headers.get("content-type", "")
+            async for line in r.aiter_lines():
+                if line.startswith("data: "):
+                    frames.append(json.loads(line[6:]))
+    check("listen is SSE", ctype.split(";")[0], "text/event-stream")
+    check("two frames then close", len(frames), 2)
+    ack, res = (frames + [{}, {}])[:2]
+    check("ack first", ack.get("method"), "notifications/subscriptions/acknowledged")
+    check("ack carries subscription id", ack.get("params", {}).get("_meta", {}).get(META_SUB), "sub-1")
+    check("nothing honored", ack.get("params", {}).get("notifications"), {})
+    check("result closes the subscription", res.get("id"), "sub-1")
+    check("result complete", res.get("result", {}).get("resultType"), "complete")
+    check("result carries subscription id", res.get("result", {}).get("_meta", {}).get(META_SUB), "sub-1")
+    try:
+        from mcp_types._v2026_07_28 import (SubscriptionsAcknowledgedNotification,
+                                            SubscriptionsListenResult)
+        SubscriptionsAcknowledgedNotification.model_validate(ack)
+        SubscriptionsListenResult.model_validate(res["result"])
+        check("strict wire models accept both frames", True, True)
+    except Exception as e:
+        check("strict wire models accept both frames", repr(e), True)
+    async with httpx.AsyncClient(timeout=10) as c:
+        r = await c.post(url, json=listen_body(2, {}), headers={**LH, "Accept": "application/json"})
+        check("JSON-only client gets a JSON result",
+              r.headers["content-type"].split(";")[0], "application/json")
+        check("JSON result carries subscription id", r.json()["result"]["_meta"][META_SUB], 2)
+        r = await c.post(url, json=listen_body(3, {"toolsListChanged": "yes"}), headers=LH)
+        check("bad filter is 400", r.status_code, 400)
+        check("bad filter is -32602", r.json()["error"]["code"], -32602)
+        r = await c.post(url, json=listen_body(4, ["x"]), headers=LH)
+        check("non-object filter is 400", r.status_code, 400)
+
     srv.should_exit = True
 
     print("\n— WSGI degrades honestly —")
@@ -174,6 +221,15 @@ async def main():
     check("WSGI is JSON", box["h"]["Content-Type"], "application/json")
     check("WSGI result correct", json.loads(out)["result"]["structuredContent"],
           {"processed": 3})
+    raw = json.dumps(listen_body(9, {})).encode()
+    env = {"REQUEST_METHOD": "POST", "CONTENT_LENGTH": str(len(raw)),
+           "wsgi.input": io.BytesIO(raw), "HTTP_MCP_PROTOCOL_VERSION": PROTOCOL,
+           "HTTP_MCP_METHOD": "subscriptions/listen",
+           "HTTP_ACCEPT": "application/json, text/event-stream"}
+    box = {}
+    out = b"".join(wsgi_app(env, lambda s, h: box.update(s=s, h=dict(h))))
+    check("WSGI listen is JSON", box["h"]["Content-Type"], "application/json")
+    check("WSGI listen result", json.loads(out)["result"]["_meta"][META_SUB], 9)
 
     print(f"\n{OK} passed, {FAIL} failed")
     raise SystemExit(1 if FAIL else 0)

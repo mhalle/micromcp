@@ -22,7 +22,7 @@ import threading
 from ._constants import (
     CANCEL_GRACE, CORS_HEADERS, HANDSHAKE_METHODS, HEADER_MISMATCH, INTERNAL_ERROR,
     INVALID_PARAMS, INVALID_REQUEST, KEEPALIVE, LIST_METHODS, MAX_BODY, MAX_URI,
-    META_CAPS, META_SERVER, META_VER, METHOD_NOT_FOUND, OFFLOAD_BYTES, PARSE_ERROR,
+    META_CAPS, META_SERVER, META_SUB, META_VER, METHOD_NOT_FOUND, OFFLOAD_BYTES, PARSE_ERROR,
     PROTOCOL, QUEUE_SIZE, ROUTING_HEADERS, SINGLETON_HEADERS, STREAM_BUDGET,
     UNSUPPORTED_VERSION, WORKERS, log,
 )
@@ -483,6 +483,20 @@ class _Core:
         if method in LIST_METHODS and params.get("cursor") is not None:
             # We never issue cursors, so any cursor is one we did not issue.
             raise Error(INVALID_PARAMS, "unknown cursor")
+        if method == "subscriptions/listen":
+            subs = params.get("notifications")
+            if subs is None:
+                subs = {}
+            if not isinstance(subs, dict):
+                raise Error(INVALID_PARAMS, "params.notifications must be an object")
+            for key in ("toolsListChanged", "promptsListChanged", "resourcesListChanged"):
+                if key in subs and not isinstance(subs[key], bool):
+                    raise Error(INVALID_PARAMS, f"params.notifications.{key} must be a boolean")
+            uris = subs.get("resourceSubscriptions")
+            if uris is not None and (not isinstance(uris, list)
+                                     or not all(isinstance(u, str) for u in uris)):
+                raise Error(INVALID_PARAMS,
+                            "params.notifications.resourceSubscriptions must be a list of strings")
         return method, params
 
     async def _bind_call(self, params, principal, big):
@@ -725,7 +739,10 @@ class _Core:
         """Dispatch a prepared request. Returns (status_code, payload)."""
         method, params, principal, rid, bound = req
         try:
-            result = await self._dispatch(method, params, principal, emit, stop, bound)
+            if method == "subscriptions/listen":
+                result = await self._listen(rid, emit)
+            else:
+                result = await self._dispatch(method, params, principal, emit, stop, bound)
             # 2026-07-28 requires these on EVERY result. They have SDK-side
             # defaults when parsing, but the strict per-version schema that
             # governs a live connection demands them explicitly. Server
@@ -742,6 +759,25 @@ class _Core:
             log.exception("dispatch of %r failed", method)
             return _err(500, rid, INTERNAL_ERROR, "Internal error")
 
+    async def _listen(self, rid, emit):
+        """`subscriptions/listen`, answered by graceful closure.
+
+        This server never emits change notifications (every `listChanged` it
+        advertises is false and it does not support resource subscriptions),
+        so a subscription has nothing to deliver. Rather than hold a stream
+        open for nothing — or 404 the method, which some SDK clients treat as
+        a failed connection — it does what the spec describes for a server
+        ending a subscription: acknowledge with the honored subset (empty),
+        then answer the request with a completion result and close. On a
+        transport without a stream (WSGI, or a client not accepting SSE) the
+        acknowledgment cannot be sent and only the result goes out.
+        """
+        sub = {META_SUB: rid}
+        if emit is not None:
+            await emit("notifications/subscriptions/acknowledged",
+                       {"_meta": sub, "notifications": {}})
+        return {"_meta": sub}
+
     async def handle(self, http_method, headers, raw, emit=None):
         """Return (status_code, payload). The only entry point transports need.
 
@@ -755,11 +791,16 @@ class _Core:
 
     def wants_stream(self, req, headers) -> bool:
         """True when a validated, argument-bound tools/call addresses a
-        Context-declaring tool AND the client accepts text/event-stream.
+        Context-declaring tool AND the client accepts text/event-stream, or
+        for a `subscriptions/listen` the client can receive as a stream.
         Decided only after `prepare` succeeded — once an SSE stream is open
         there is no way back to a JSON error response with the right status."""
         method, params = req[0], req[1]
-        if method != "tools/call" or not _accepts(headers, "text/event-stream"):
+        if not _accepts(headers, "text/event-stream"):
+            return False
+        if method == "subscriptions/listen":
+            return True
+        if method != "tools/call":
             return False
         entry = self.mcp.tools.get(params.get("name"))
         return bool(entry and entry.get("_context"))

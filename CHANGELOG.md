@@ -15,6 +15,12 @@ First packaged release. Same public API as the original single file:
   `offload_bytes`, `stream_budget`, `workers`, `timeout`, `max_body`) are
   constructor options; the module constants are only their defaults.
 
+### Interop
+- `subscriptions/listen` is accepted and closed gracefully (acknowledgment
+  with an empty honored set, then a completion result carrying the
+  subscription id) instead of answering 404 / `-32601`, which Go SDK 1.7
+  clients treated as a failed connection.
+
 ### UI apps
 - `meta=` on tools, resources, templates, and prompts is validated at
   registration (JSON, valid `_meta` keys, no reserved prefixes) and published

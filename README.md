@@ -321,6 +321,26 @@ resources. A client that only speaks the initialize-handshake era is refused
 with `-32022` and a `data.supported` / `data.requested` pair, which is what a
 dual-era client parses as "modern peer, renegotiate".
 
+`subscriptions/listen` is accepted and closed gracefully: the server never
+emits change notifications (every `listChanged` it advertises is false), so
+it acknowledges with an empty honored set, answers the request with a
+completion result carrying the subscription id, and closes the stream. That
+matters for Go SDK 1.7 clients such as Crush, which open a listen stream
+whenever the host registers a list-changed handler and treat any error as a
+failed connection; Go SDK 1.8 gates the request on the advertised capability.
+
+Which clients can reach a server that speaks only this revision, as of
+2026-09-14: Claude.ai and Claude desktop connectors, Claude Code 2.1.232+,
+GitHub Copilot CLI 1.0.81+, Goose 1.50+, Crush 0.88+, and anything built on
+the Python `mcp` 2.x, Go 1.7+, C# 2.x, or Ruby 1.2+ SDK clients, whose
+default is to probe `server/discover` first. TypeScript SDK 2.x and Rust
+`rmcp` 3.x can, but only when the host opts in (Codex CLI needs its
+`mcp_2026_07_28` feature flag; Mastra needs `protocolVersion: 'auto'`).
+Hosts still on TypeScript SDK 1.x (VS Code, Cursor as far as is known,
+Gemini CLI, Cline, LibreChat, Open WebUI), Zed, ChatGPT connectors, and the
+Java, Kotlin, and Swift SDKs cannot. Serving both eras is a deliberate
+non-goal here; put a translating gateway in front if legacy clients matter.
+
 OAuth is the boundary where rolling your own stops being sensible. Bearer tokens
 against your own store are fine; being an OAuth 2.1 authorization server (RFC
 9728 / 8414 / 7591, PKCE) is not 600 lines and is not code to hand-roll.
@@ -344,7 +364,7 @@ test_micromcp.py    29 unit assertions, stdlib only
 conform.py          11 checks against the strict mcp-types wire schema
 interop.py          end-to-end with the official mcp client, 9 assertions
 test_asgi.py        native ASGI under uvicorn and mounted in Starlette
-test_progress.py    24 SSE checks: ordering, cancellation, WSGI degradation
+test_progress.py    40 SSE checks: ordering, cancellation, subscriptions/listen, WSGI degradation
 harnesses.py        wsgiref, Flask, Starlette, waitress, gunicorn
 ergonomics.py       API tour, 12 assertions
 test_hardening.py   247 regression checks from four adversarial reviews + UI apps

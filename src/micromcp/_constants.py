@@ -11,6 +11,7 @@ PROTOCOL = "2026-07-28"
 META_VER = "io.modelcontextprotocol/protocolVersion"
 META_CAPS = "io.modelcontextprotocol/clientCapabilities"
 META_SERVER = "io.modelcontextprotocol/serverInfo"
+META_SUB = "io.modelcontextprotocol/subscriptionId"
 
 # JSON-RPC / MCP error codes
 PARSE_ERROR = -32700
