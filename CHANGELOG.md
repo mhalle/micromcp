@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 — unreleased
+## 0.1.0 — 2026-09-14 (tagged; not yet on PyPI)
 
 First packaged release. Same public API as the original single file:
 `from micromcp import MCP, Server, ASGIServer, Context, Principal`.
