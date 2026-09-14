@@ -154,9 +154,10 @@ def untested_defenses():
     srv = Server(m, authenticate=auth)
 
     print("— U1 tool guards are enforced (M08: no guarded tool in the suite) —")
-    r = result(wsgi(srv, "tools/call", {"name": "secret_tool", "arguments": {}}))
-    check("guarded tool, anonymous -> in-band isError", (r.get("isError"), "structuredContent" in r), (True, False))
-    check("...with the documented text", r["content"][0]["text"], "Permission denied for tool 'secret_tool'")
+    check("guarded tool, anonymous -> 404/-32601, indistinguishable from an unknown tool",
+          code(wsgi(srv, "tools/call", {"name": "secret_tool", "arguments": {}})), (404, -32601))
+    check("...same answer as a tool that does not exist",
+          code(wsgi(srv, "tools/call", {"name": "no_such_tool", "arguments": {}})), (404, -32601))
     check("guarded tool, principal -> runs",
           result(wsgi(srv, "tools/call", {"name": "secret_tool", "arguments": {}}, auth="Bearer good")).get("structuredContent"), {"s": 1})
     names = lambda auth=None: sorted(t["name"] for t in result(wsgi(srv, "tools/list", auth=auth))["tools"])
@@ -165,7 +166,7 @@ def untested_defenses():
 
     print("— U2 a guard that raises denies, everywhere, without leaking (M07) —")
     s, r, _ = wsgi(srv, "tools/call", {"name": "gtool", "arguments": {}}, auth="Bearer good")
-    check("raising guard on a tool -> isError", (s, r["result"].get("isError")), (200, True))
+    check("raising guard on a tool -> 404/-32601 (hidden)", (s, r["error"]["code"]), (404, -32601))
     check("...and the exception text stays server-side", SECRET in json.dumps(r), False)
     check("raising guard on a resource -> 404/-32601", code(wsgi(srv, "resources/read", {"uri": "g://res"}, auth="Bearer good")), (404, -32601))
     check("raising guard on a prompt -> 404/-32601",

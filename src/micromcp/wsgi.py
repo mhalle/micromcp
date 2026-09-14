@@ -105,6 +105,8 @@ class Server(_Core):
         hdrs = [("Content-Length", str(len(data)))]
         if data:
             hdrs.insert(0, ("Content-Type", "application/json"))
+        if http_method == "HEAD":                     # same head as GET, no body
+            data = b""
         hdrs += self.extra_headers(http_method, headers, status, getattr(reply, "headers", ()))
         start_response(_STATUS.get(status, f"{status} Error"), hdrs)
         return [data]

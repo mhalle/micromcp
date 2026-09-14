@@ -50,6 +50,11 @@ def build():
         """Guarded: the guard raises the challenge."""
         return {"ok": True}
 
+    @mcp.tool(guards=[lambda who: who is not None])
+    def quiet() -> dict:
+        """Guarded: the guard just says no."""
+        return {"ok": True}
+
     @mcp.tool
     async def leaky(ctx: Context) -> dict:
         """Raises the challenge after the stream is committed."""
@@ -173,8 +178,17 @@ def legacy_wsgi_section():
     check("no version header at all is served", s, 200)
     s, j, _ = wsgi(app, rpc("tools/call", {"name": "add", "arguments": {"a": 2, "b": 3}}), V)
     check("tools/call served", j["result"].get("structuredContent"), {"sum": 5})
-    s, j, _ = wsgi(app, rpc("tools/call", {"name": "nope", "arguments": {}}), V)
-    check("unknown tool still 404/-32601", (s, j["error"]["code"]), (404, -32601))
+    s, j, h = wsgi(app, rpc("tools/call", {"name": "nope", "arguments": {}}), V)
+    check("unknown tool is -32601 under HTTP 200 for a 2025 client (404 reads as session gone)",
+          (s, j["error"]["code"]), (200, -32601))
+    check("legacy error reply names the era served", h.get("mcp-protocol-version"), "2025-11-25")
+    s, j, h = wsgi(app, rpc("tools/call", {"name": "quiet", "arguments": {}}), V)
+    check("hidden tool answers exactly like an unknown one", (s, j["error"]["code"]), (200, -32601))
+    s, j, h = wsgi(app, rpc("tools/call", {"name": "vault", "arguments": {}}), V)
+    check("a guard that raises the challenge still gets its 401", (s, j["error"]["code"]), (401, -32001))
+    body, hdrs = modern("tools/call", {"name": "nope", "arguments": {}}, name="nope")
+    s, j, h = wsgi(app, body, hdrs)
+    check("modern unknown tool keeps 404", (s, j["error"]["code"], h.get("mcp-protocol-version")), (404, -32601, PROTOCOL))
     s, j, _ = wsgi(app, rpc("tools/call", {"name": "add", "arguments": {"a": "x", "b": 3}}), V)
     check("argument validation still applies", (s, j["error"]["code"]), (400, -32602))
     s, j, _ = wsgi(app, rpc("resources/read", {"uri": "schema://demo"}), V)
@@ -196,9 +210,15 @@ def legacy_wsgi_section():
     s, j, _ = wsgi(app, rpc("tools/list"), {"MCP-Protocol-Version": PROTOCOL})
     check("modern header without envelope stays on the modern ladder", (s, j["error"]["code"]), (400, -32602))
     s, j, _ = wsgi(app, rpc("server/discover"), V)
-    check("claim-less discover is not a 2025 method", (s, j["error"]["code"]), (404, -32601))
+    check("claim-less discover is not a 2025 method", (s, j["error"]["code"]), (200, -32601))
     s, j, _ = wsgi(app, rpc("subscriptions/listen", {"notifications": {}}), V)
-    check("claim-less listen is not a 2025 method", (s, j["error"]["code"]), (404, -32601))
+    check("claim-less listen is not a 2025 method", (s, j["error"]["code"]), (200, -32601))
+    s, j, _ = wsgi(app, rpc("tools/list", {"_meta": {META_VER: "2025-06-18", META_CAPS: {}}}),
+                   {"MCP-Protocol-Version": "2025-06-18", "Mcp-Method": "tools/list"})
+    check("a 2025 version inside the envelope is refused naming modern versions only",
+          (s, j["error"]["code"], j["error"]["data"]["supported"]), (400, -32022, [PROTOCOL]))
+    s, j, _ = wsgi(app, rpc("tools/list"), {**V, "Mcp-Method": ""})
+    check("an empty Mcp-Method on a legacy request counts as absent", s, 200)
     s, j, _ = wsgi(app, None, V, method="GET")
     check("GET is 405", s, 405)
     s, j, _ = wsgi(app, None, V, method="DELETE")
@@ -254,6 +274,16 @@ async def legacy_asgi_section():
         r = await c.post(url, json=rpc("tools/call", {"name": "crunch", "arguments": {"steps": 1}}),
                          headers={k: v for k, v in V.items() if k != "Accept"})
         check("absent Accept never gets SSE", r.headers["content-type"].split(";")[0], "application/json")
+        for acc in ("application/json, text/event-stream;q=0", "text/event-stream-x", "text/*", "*/*",
+                    "application/json;text/event-stream"):
+            r = await c.post(url, json=rpc("tools/call", {"name": "crunch", "arguments": {"steps": 1}}),
+                             headers={**V, "Accept": acc})
+            check(f"Accept {acc!r} never gets SSE", r.headers["content-type"].split(";")[0], "application/json")
+        r = await c.post(url, json=rpc("tools/call", {"name": "crunch", "arguments": {"steps": 1}}),
+                         headers={**V, "Accept": "application/json, TEXT/EVENT-STREAM;q=0.5"})
+        check("case-insensitive Accept with q>0 gets SSE",
+              (r.headers["content-type"].split(";")[0], r.headers.get("mcp-protocol-version")),
+              ("text/event-stream", "2025-11-25"))
 
     from mcp import Client
     SEEN.clear()
@@ -322,27 +352,42 @@ def oauth_wsgi_section():
     check("its challenge takes the server default without mutation",
           shared.challenge(guarded.metadata_url)[0][1], f'Bearer resource_metadata="https://example.test{WELL_KNOWN}/mcp", scope="shared"')
 
+    WK = app.well_known_path
+    check("the document is served at the URL the challenge names", WK, WELL_KNOWN + "/mcp")
+    check("metadata_url and well-known path agree", app.metadata_url.endswith(WK), True)
     s, j, h = wsgi(app, None, method="GET", path=WELL_KNOWN)
-    check("well-known document served at the bare path", (s, j), (200, DOC))
+    check("the bare well-known path is not ours when the resource has a path", s, 404)
+    s, j, h = wsgi(app, None, method="GET", path=WK)
+    check("well-known served at the derived path", (s, j), (200, DOC))
     check("well-known readable cross-origin", h.get("access-control-allow-origin"), "*")
-    s, j, h = wsgi(app, None, method="GET", path=WELL_KNOWN + "/mcp")
-    check("well-known served at the path-suffixed form", (s, j), (200, DOC))
-    s, j, h = wsgi(app, None, method="GET", path=WELL_KNOWN + "/other")
+    doc_len = h.get("content-length")
+    s, j, h = wsgi(app, None, method="GET", path=WK + "/other")
     check("other suffixes are not ours", s, 404)
-    s, j, h = wsgi(app, rpc("tools/list"), method="POST", path=WELL_KNOWN)
-    check("POST to well-known is 405 with an honest Allow", (s, h.get("allow")), (405, "GET, HEAD, OPTIONS"))
-    s, j, h = wsgi(app, None, method="HEAD", path=WELL_KNOWN)
-    check("HEAD on well-known is 200 without a body", (s, j), (200, None))
-    s, j, h = wsgi(app, None, method="OPTIONS", path=WELL_KNOWN)
+    s, j, h = wsgi(app, rpc("tools/list"), method="POST", path=WK)
+    check("POST to well-known is 405 with an honest Allow and CORS",
+          (s, h.get("allow"), h.get("access-control-allow-origin")), (405, "GET, HEAD, OPTIONS", "*"))
+    s, j, h = wsgi(app, None, method="HEAD", path=WK)
+    check("HEAD on well-known is 200, no body, GET's length and type",
+          (s, j, h.get("content-length"), h.get("content-type")), (200, None, doc_len, "application/json"))
+    s, j, h = wsgi(app, None, method="OPTIONS", path=WK)
     check("OPTIONS preflight on well-known is 204 with CORS",
           (s, h.get("access-control-allow-origin"), h.get("access-control-allow-methods")), (204, "*", "GET, HEAD, OPTIONS"))
-    s, j, h = wsgi(app, None, {"Origin": "https://app.example"}, method="GET", path=WELL_KNOWN)
+    s, j, h = wsgi(app, None, {"Origin": "https://app.example"}, method="GET", path=WK)
     check("well-known CORS is * even for an allowed origin, once", h.get("access-control-allow-origin"), "*")
     hosted = Server(build(), resource_metadata=DOC, allowed_hosts={"example.test"})
-    s, j, h = wsgi(hosted, None, {"Host": "evil.example"}, method="GET", path=WELL_KNOWN)
+    s, j, h = wsgi(hosted, None, {"Host": "evil.example"}, method="GET", path=WK)
     check("well-known honors allowed_hosts", s, 403)
-    s, j, h = wsgi(hosted, None, method="GET", path=WELL_KNOWN)
+    s, j, h = wsgi(hosted, None, method="GET", path=WK)
     check("well-known served to the allowed host", s, 200)
+    rootdoc = Server(build(), resource_metadata={"resource": "https://example.test", "authorization_servers": ["https://as"]})
+    check("a root resource is served at the bare well-known path", rootdoc.well_known_path, WELL_KNOWN)
+    s, j, h = wsgi(app, body, {**hdrs, "Authorization": "Bearer ok, Bearer other"}, path="/mcp")
+    check("a folded duplicate Authorization (WSGI) is refused", (s, j["error"]["code"]), (400, -32600))
+
+    def returns_class(headers):
+        return Unauthorized                    # the class, not an instance
+    s, j, h = wsgi(Server(build(), authenticate=returns_class), *modern("tools/list"))
+    check("authenticate returning the exception CLASS is refused (500), never a principal", s, 500)
 
     plain = Server(build(), authenticate=authenticate)
     s, j, h = wsgi(plain, *modern("tools/list"))
@@ -356,10 +401,16 @@ def oauth_wsgi_section():
     e = Unauthorized(scope="a\x00b\x7fc\u00e9d\u2028")
     check("control characters and non-ASCII never reach the header", e.headers[0][1], 'Bearer scope="abcd"')
     try:
-        Error(1, "x", headers=[("Bad Name", "v")]); bad = False
+        Unauthorized(scope="x" * 2000); bad = False
     except ValueError:
         bad = True
-    check("Error rejects an invalid header name", bad, True)
+    check("an over-long challenge parameter is refused, not truncated", bad, True)
+    for name in ("Bad Name", "X\n", "X-\r"):
+        try:
+            Error(1, "x", headers=[(name, "v")]); bad = False
+        except ValueError:
+            bad = True
+        check(f"Error rejects the header name {name!r}", bad, True)
     check("Error strips CRLF from header values", Error(1, "x", headers=[("X", "a\r\nSet-Cookie: b")]).headers,
           [("X", "aSet-Cookie: b")])
     try:
@@ -400,8 +451,10 @@ async def oauth_asgi_section():
             frames = [json.loads(line[6:]) async for line in rs.aiter_lines() if line.startswith("data: ")]
         check("a challenge raised mid-stream is in-band (documented limitation)",
               (ctype.split(";")[0], frames[-1].get("error", {}).get("code")), ("text/event-stream", -32001))
-        r = await c.get(base + WELL_KNOWN)
-        check("ASGI serves the document", (r.status_code, r.json()), (200, DOC))
+        r = await c.get(base + WELL_KNOWN + "/mcp")
+        check("ASGI serves the document at the derived path", (r.status_code, r.json()), (200, DOC))
+        r = await c.head(base + WELL_KNOWN + "/mcp")
+        check("ASGI HEAD on the document", (r.status_code, r.headers.get("content-type"), r.content), (200, "application/json", b""))
         r = await c.post(base + "/mcp", json=body,
                          headers={**hdrs, "Accept": "application/json, text/event-stream", "Authorization": "Bearer ok"})
         check("ASGI authenticated request served", r.status_code, 200)

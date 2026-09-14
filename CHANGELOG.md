@@ -29,8 +29,13 @@ First packaged release. Same public API as the original single file:
   the TypeScript SDK 2.0.0 client's default mode and the Python client's
   `mode="legacy"`. `2025-03-26` is not served (it mandated batch arrays).
 - A posted JSON-RPC response is acknowledged with `202`; a null envelope
-  claim routes modern; SSE requires an explicit `text/event-stream` in
-  `Accept`; the `logging` capability is declared.
+  claim routes modern; SSE requires an explicit, non-`q=0`
+  `text/event-stream` in `Accept` (parsed, not substring-matched); the
+  `logging` capability is declared; legacy errors and streams name the era
+  served and a legacy `-32601` travels under `200`; the envelope ladder's
+  `-32022` lists modern revisions only; a hidden tool answers like an
+  unknown one; WSGI-folded duplicates of `Authorization`/`Host`/`Origin` are
+  refused.
 - `ctx.client_info` exposes the envelope's client identity.
 
 ### Auth
@@ -41,9 +46,12 @@ First packaged release. Same public API as the original single file:
   it. `resource_metadata=` serves the RFC 9728 document at
   `/.well-known/oauth-protected-resource[<path>]` (GET/HEAD/OPTIONS, CORS `*`,
   honoring `allowed_hosts`) and supplies the challenge URL, derived from the
-  document's `resource` rather than from `Host`. Challenge parameters and
-  every `Error` header are reduced to printable ASCII; exceptions are never
-  mutated. Error replies can carry response headers; a 401 raised after an
+  document's `resource` rather than from `Host`, and the document is served
+  at exactly that derived path (`well_known_path`; HEAD supported, honest
+  `Allow`, CORS on every answer). Challenge parameters and every `Error`
+  header are reduced to printable ASCII and refused when over-long;
+  exceptions are never mutated; `authenticate` returning an exception class
+  is refused. Error replies can carry response headers; a 401 raised after an
   SSE stream opened is delivered in-band and logged.
 
 ### UI apps

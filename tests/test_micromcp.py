@@ -111,7 +111,7 @@ check("raising tool -> message", r["result"]["content"][0]["text"],
 
 print("— auth guard —")
 s, r = post("tools/call", {"name": "protected", "arguments": {"x": 1}})
-check("guard blocks anonymous", r["result"]["isError"], True)
+check("guard hides the tool from an anonymous call (404/-32601)", (s, r["error"]["code"]), (404, -32601))
 s, r = post("tools/call", {"name": "protected", "arguments": {"x": 1}},
             hdrs={"Authorization": "Bearer good"})
 check("guard allows principal", r["result"]["structuredContent"], {"x": 1})

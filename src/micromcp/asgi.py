@@ -44,6 +44,8 @@ class ASGIServer(_Core):
             hdrs = [(b"content-length", str(len(data)).encode())]
             if data:
                 hdrs.insert(0, (b"content-type", b"application/json"))
+            if http_method == "HEAD":                 # same head as GET, no body
+                data = b""
             hdrs += [(k.lower().encode("latin-1"), v.encode("latin-1", "replace"))
                      for k, v in self.extra_headers(http_method, headers, status, extra)]
             await send({"type": "http.response.start", "status": status, "headers": hdrs})
@@ -100,7 +102,7 @@ class ASGIServer(_Core):
                 # Tell nginx and friends not to buffer, or frames arrive in a lump.
                 (b"x-accel-buffering", b"no")]
         hdrs += [(k.lower().encode("latin-1"), v.encode("latin-1", "replace"))
-                 for k, v in self.extra_headers("POST", headers, 200)]
+                 for k, v in self.stream_headers(req, headers)]
         await send({"type": "http.response.start", "status": 200, "headers": hdrs})
 
         q, worker, stop = self.spawn(req, headers)

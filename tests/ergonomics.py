@@ -126,8 +126,8 @@ s, r = rpc("tools/call", {"name": "crash_count", "arguments": {"street": "Washin
 print(f"  call     -> {r['result']['structuredContent']}")
 check("call result", r["result"]["structuredContent"], {"street": "Washington", "since": 2020, "count": 11})
 s, r = rpc("tools/call", {"name": "protected", "arguments": {"x": 1}})
-print(f"  guard    -> isError={r['result'].get('isError')}")
-check("guard denies anonymous caller in-band", r["result"].get("isError"), True)
+print(f"  guard    -> HTTP {s} {r.get('error', {}).get('code')}")
+check("guard hides the tool from an anonymous caller (404/-32601)", (s, r["error"]["code"]), (404, -32601))
 
 # ══ What doesn't ═══════════════════════════════════════════════════════════
 print("\nNOW SUPPORTED")

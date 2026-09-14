@@ -56,21 +56,23 @@ def django_async_view(server: ASGIServer):
             early, req = await server.prepare(request.method, headers, request.body)
         else:
             req = None
-        own = ()
         if early is None and server.wants_stream(req, headers):
             resp = StreamingHttpResponse(server.frames(req, headers),
                                          content_type="text/event-stream")
             resp["Cache-Control"] = "no-cache"
             resp["X-Accel-Buffering"] = "no"
-            status = 200
-        else:
-            out = early if early is not None else await server.respond(req, headers=headers)
-            status, payload = out
-            own = getattr(out, "headers", ())
-            status, body = _encode(status, payload)
-            resp = HttpResponse(body, status=status,
-                                content_type="application/json" if body else None)
-        for k, v in server.extra_headers(request.method, headers, status, own):
+            for k, v in server.stream_headers(req, headers):
+                resp[k] = v
+            return resp
+        out = early if early is not None else await server.respond(req, headers=headers)
+        status, payload = out
+        status, body = _encode(status, payload)
+        resp = HttpResponse(b"" if request.method == "HEAD" else body, status=status,
+                            content_type="application/json" if body else None)
+        if request.method == "HEAD":
+            resp["Content-Length"] = str(len(body))
+        for k, v in server.extra_headers(request.method, headers, status,
+                                         getattr(out, "headers", ())):
             resp[k] = v
         return resp
 

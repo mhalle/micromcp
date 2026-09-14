@@ -70,6 +70,24 @@ def _accepts(headers, mime: str) -> bool:
     return False
 
 
+def _accepts_sse(headers) -> bool:
+    """True only when Accept names text/event-stream itself (no wildcards)
+    with a non-zero q: RFC 9110 §12.5.1 makes q=0 "not acceptable"."""
+    for part in (headers.get("accept") or "").split(","):
+        media, _, params = part.partition(";")
+        if media.strip().lower() != "text/event-stream":
+            continue
+        for p in params.split(";"):
+            k, _, v = p.strip().partition("=")
+            if k.strip().lower() == "q":
+                try:
+                    return float(v.strip() or "1") > 0
+                except ValueError:
+                    return False
+        return True
+    return False
+
+
 def _jsonable(o):
     """json.dumps default= for handler results: dataclasses, pydantic, sets, dates."""
     if dataclasses.is_dataclass(o) and not isinstance(o, type):
@@ -345,9 +363,17 @@ class _Core:
                                  "URL without query or fragment (RFC 9728)")
             # RFC 9728 §3: the metadata URL is the resource's origin plus the
             # well-known path plus the resource's path. Derived from the
-            # operator's own configuration — never from Host or a proxy header.
-            self.metadata_url = (f"{u.scheme}://{u.netloc}{WELL_KNOWN}"
-                                 f"{_norm_path(u.path) if u.path not in ('', '/') else ''}")
+            # operator's own configuration — never from Host or a proxy header —
+            # and the document is served at exactly that path, so the challenge
+            # can never point at something this server does not answer.
+            suffix = _norm_path(u.path) if u.path not in ("", "/") else ""
+            self.metadata_url = f"{u.scheme}://{u.netloc}{WELL_KNOWN}{suffix}"
+            self.well_known_path = WELL_KNOWN + suffix
+            if path and suffix and _norm_path(path) != suffix:
+                log.warning("resource_metadata['resource'] path %r differs from path=%r: the "
+                            "document is served at %s; make sure requests for it reach this "
+                            "server (a proxy that strips a prefix must not strip this one)",
+                            suffix, path, self.well_known_path)
         self.legacy = legacy
         self.resource_metadata = copy.deepcopy(resource_metadata)
         self._warned_bare = False
@@ -429,9 +455,7 @@ class _Core:
         """The RFC 9728 document, when configured: GET answers it (readable
         cross-origin, as the RFC's clients fetch it from anywhere), OPTIONS is
         a bare preflight, anything else is 405. None when not ours."""
-        if self.resource_metadata is None:
-            return None
-        if _norm_path(path) not in (WELL_KNOWN, WELL_KNOWN + (self.path or "")):
+        if self.resource_metadata is None or _norm_path(path) != self.well_known_path:
             return None
         if not self._host_ok(headers):            # DNS-rebinding guard applies here too
             return _err(403, None, HEADER_MISMATCH, "Host not allowed")
@@ -445,12 +469,27 @@ class _Core:
             return _Reply(204, None, cors)
         if http_method not in ("GET", "HEAD"):
             return _err(405, None, INVALID_REQUEST, "GET only",
-                        headers=[("Allow", "GET, HEAD, OPTIONS")])
-        doc = copy.deepcopy(self.resource_metadata) if http_method == "GET" else None
-        return _Reply(200, doc, cors)
+                        headers=[("Allow", "GET, HEAD, OPTIONS"), *cors])
+        # HEAD gets the same answer; the transports send the head without the
+        # body. The document is only ever serialized, never handed out, so no
+        # copy is needed per request.
+        return _Reply(200, self.resource_metadata, cors)
 
     def _supported(self) -> list:
         return [PROTOCOL, *LEGACY_VERSIONS] if self.legacy else [PROTOCOL]
+
+    @staticmethod
+    def _served(ver) -> str:
+        """The 2025 revision a legacy reply names: the request's, else newest."""
+        return ver if ver in LEGACY_VERSIONS else LEGACY_VERSIONS[0]
+
+    def stream_headers(self, req, headers) -> list:
+        """Response headers for a request-scoped SSE stream (committed as 200
+        before the handler runs); a legacy stream names the era served."""
+        era = req[5] if len(req) > 5 else "modern"
+        own = ([("MCP-Protocol-Version", self._served(headers.get("mcp-protocol-version")))]
+               if era == "legacy" else ())
+        return self.extra_headers("POST", headers, 200, own)
 
     def _capabilities(self) -> dict:
         return {"tools": {"listChanged": False},
@@ -483,12 +522,14 @@ class _Core:
             raise Error(INVALID_REQUEST, "Content-Type must be application/json")
         if not _accepts(headers, "application/json"):
             raise Error(INVALID_REQUEST, "Accept must admit application/json", status=406)
-        for h in ("mcp-protocol-version", "mcp-method"):
-            # These never legitimately contain a comma, so one means a server
-            # folded two copies. Mcp-Name may (data: URIs), so it is exempt;
-            # ASGI catches its duplicates on the raw pairs instead.
+        for h in ("mcp-protocol-version", "mcp-method", "authorization", "host", "origin"):
+            # None of these legitimately contains a comma (bearer and basic
+            # credentials never do; digest is not supported), so one means a
+            # WSGI server folded two copies. Mcp-Name may (data: URIs), so it
+            # is exempt; ASGI catches its duplicates on the raw pairs instead.
             if "," in headers.get(h, ""):
-                raise Error(HEADER_MISMATCH, f"{h} header appears more than once")
+                code = HEADER_MISMATCH if h in ROUTING_HEADERS else INVALID_REQUEST
+                raise Error(code, f"{h} header appears more than once")
 
     def _validate(self, headers, body):
         """Returns (method, params, era). A request that claims a revision in
@@ -513,8 +554,12 @@ class _Core:
         # is a malformed modern request, not a legacy one), as the SDK does.
         claimed = meta is not None and META_VER in meta
         if self.legacy and not claimed and ver != PROTOCOL:
-            self._validate_legacy(ver, method, params, headers)
             era = "legacy"
+            try:
+                self._validate_legacy(ver, method, params, headers)
+            except Error as e:
+                e.headers.append(("MCP-Protocol-Version", self._served(ver)))
+                raise
         else:
             self._validate_modern(ver, method, headers, meta)
             era = "modern"
@@ -539,7 +584,7 @@ class _Core:
                 # Modern requests must carry the binding; a legacy request
                 # need not, but one that does must agree with its body, so a
                 # gateway routing on the header cannot be shown a decoy.
-                if (era == "modern" or "mcp-name" in headers) \
+                if (era == "modern" or headers.get("mcp-name")) \
                         and _decode_hdr(headers.get("mcp-name")) != want:
                     raise Error(HEADER_MISMATCH,
                                 f"Mcp-Name header does not match body value {want!r}")
@@ -573,11 +618,14 @@ class _Core:
             # which turns a confusing failure into an accurate "no mutually
             # supported version" (or, with legacy serving on, tells a client
             # that mixed the eras which revisions it may retry with).
+            # The envelope ladder names only the modern revisions, as the SDK
+            # entry does: a client that used the envelope is a modern client,
+            # and listing 2025 versions here would send it round in a loop.
             raise Error(UNSUPPORTED_VERSION,
                         f"this server implements the stateless MCP revision {PROTOCOL}"
                         + ("" if self.legacy else " only")
                         + f"; {method!r} belongs to the initialize-handshake era",
-                        data={"supported": self._supported(),
+                        data={"supported": [PROTOCOL],
                               "requested": ver or (meta or {}).get(META_VER) or ""})
 
         # Envelope first (the SDK's rung 1), then headers, then version.
@@ -590,10 +638,12 @@ class _Core:
             raise Error(HEADER_MISMATCH,
                         f"MCP-Protocol-Version {ver!r} != body _meta {meta.get(META_VER)!r}")
         if ver != PROTOCOL:
-            # -32022, not -32020: the client reads data.supported to renegotiate.
+            # -32022, not -32020: the client reads data.supported to renegotiate
+            # (among modern revisions; the 2025 era is reached by dropping the
+            # envelope, never by naming a 2025 version inside it).
             raise Error(UNSUPPORTED_VERSION,
                         f"unsupported protocol version {ver!r}",
-                        data={"supported": self._supported(), "requested": ver})
+                        data={"supported": [PROTOCOL], "requested": ver})
         if not isinstance(meta.get(META_CAPS), dict):
             raise Error(INVALID_PARAMS, f"request _meta missing {META_CAPS} (an object)")
         # Mcp-Method is compared verbatim (as the SDK does); only Mcp-Name
@@ -610,7 +660,7 @@ class _Core:
         if ver is not None and ver not in LEGACY_VERSIONS:
             raise Error(UNSUPPORTED_VERSION, f"unsupported protocol version {ver!r}",
                         data={"supported": self._supported(), "requested": ver})
-        if "mcp-method" in headers and headers["mcp-method"] != method:
+        if headers.get("mcp-method") and headers["mcp-method"] != method:
             raise Error(HEADER_MISMATCH, "Mcp-Method header does not match body method")
         if method == "notifications/initialized":
             raise Error(INVALID_REQUEST, "Invalid Request: a notification must not carry an id")
@@ -716,10 +766,9 @@ class _Core:
             if not entry:
                 raise Error(METHOD_NOT_FOUND, f"no such tool {name!r}", 404)
             if not _allowed(entry, principal, strict=True):
-                # Tool-level failures are in-band results, not JSON-RPC errors.
-                return {"content": [{"type": "text",
-                                     "text": f"Permission denied for tool {name!r}"}],
-                        "isError": True}
+                # Indistinguishable from a tool that does not exist, as for
+                # resources and prompts: no existence oracle for hidden tools.
+                raise Error(METHOD_NOT_FOUND, f"no such tool {name!r}", 404)
             kwargs = bound if bound is not None else await self._bind_call(params, principal, False)
             inject(entry, kwargs)
             try:
@@ -858,8 +907,9 @@ class _Core:
                     principal = await self.offload(self.authenticate, headers, aux=True)
                 if isinstance(principal, Error):
                     raise principal          # `return Unauthorized(...)` means raise, never "allow"
-                if isinstance(principal, BaseException):
-                    log.error("authenticate returned an exception object %r; refusing", principal)
+                if isinstance(principal, BaseException) or (
+                        isinstance(principal, type) and issubclass(principal, BaseException)):
+                    log.error("authenticate returned an exception %r; refusing", principal)
                     raise Error(INTERNAL_ERROR, "Internal error", 500)
             bound = (await self._bind_call(params, principal, big)
                      if method == "tools/call" else None)
@@ -870,20 +920,31 @@ class _Core:
             return _err(500, rid, INTERNAL_ERROR, "Internal error"), None
         return None, (method, params, principal, rid, bound, era)
 
-    def _error_reply(self, e, rid, headers=None):
+    def _error_reply(self, e, rid, headers=None, era="modern"):
         """An Error as a reply. An `Unauthorized` without its own challenge URL
         names this server's well-known document, derived at construction from
         `resource_metadata["resource"]`; the exception is never mutated, so a
-        shared instance cannot carry one caller's data to the next."""
-        hdrs = e.headers
+        shared instance cannot carry one caller's data to the next. A legacy
+        reply names the era served, and never travels under 404: the 2025-era
+        SDK clients read that status as a terminated session and discard the
+        JSON-RPC error inside it."""
+        hdrs = list(e.headers)
+        status = e.status
+        if era == "legacy":
+            if not any(k.lower() == "mcp-protocol-version" for k, _ in hdrs):
+                hdrs.append(("MCP-Protocol-Version",
+                             self._served((headers or {}).get("mcp-protocol-version"))))
+            if status == 404:
+                status = 200
         if isinstance(e, Unauthorized):
-            hdrs = e.challenge(self.metadata_url)
             if not (e.resource_metadata or self.metadata_url) and not self._warned_bare:
                 self._warned_bare = True
                 log.warning("401 challenge carries no resource_metadata URL: pass "
                             "resource_metadata= to the server (or to Unauthorized); "
                             "MCP clients cannot start OAuth from a bare challenge")
-        return _err(e.status, rid, e.code, e.message, e.data, headers=hdrs)
+            hdrs = ([h for h in hdrs if h[0].lower() != "www-authenticate"]
+                    + e.challenge(self.metadata_url))
+        return _err(status, rid, e.code, e.message, e.data, headers=hdrs)
 
     async def respond(self, req, emit=None, stop=None, headers=None):
         """Dispatch a prepared request. Returns (status_code, payload)."""
@@ -920,7 +981,7 @@ class _Core:
                                              "version": self.mcp.version}}
             return _Reply(200, {"jsonrpc": "2.0", "id": rid, "result": result})
         except Error as e:
-            return self._error_reply(e, rid, headers or {})
+            return self._error_reply(e, rid, headers or {}, era)
         except Exception:
             log.exception("dispatch of %r failed", method)
             return _err(500, rid, INTERNAL_ERROR, "Internal error")
@@ -965,7 +1026,7 @@ class _Core:
         era = req[5] if len(req) > 5 else "modern"
         # An explicit opt-in only: an absent or wildcard Accept must not put a
         # `data:`-prefixed body in front of a JSON-only client.
-        if "text/event-stream" not in (headers.get("accept") or "").lower():
+        if not _accepts_sse(headers):
             return False
         if method == "subscriptions/listen":
             return era == "modern"

@@ -16,16 +16,20 @@ def _hval(v) -> str:
     never inject a header or put a byte on the wire that a server refuses
     (control characters and non-ASCII crash or disconnect real containers)."""
     s = "".join(ch for ch in str(v) if 0x20 <= ord(ch) < 0x7F and ch not in '"\\')
-    return s[:_MAX_HEADER_VALUE]
+    if len(s) > _MAX_HEADER_VALUE:
+        raise ValueError(f"header parameter longer than {_MAX_HEADER_VALUE} characters")
+    return s
 
 
 def _header(name, value) -> tuple[str, str]:
     """Validate one response header: a token name, and a value with no control
     characters or non-ASCII (the transports encode latin-1; CR/LF would split)."""
-    if not isinstance(name, str) or not _TOKEN_RE.match(name):
+    if not isinstance(name, str) or not _TOKEN_RE.fullmatch(name):
         raise ValueError(f"invalid header name {name!r}")
     value = "".join(ch for ch in str(value) if 0x20 <= ord(ch) < 0x7F)
-    return name, value[:_MAX_HEADER_VALUE * 4]
+    if len(value) > _MAX_HEADER_VALUE * 4:
+        raise ValueError(f"header value longer than {_MAX_HEADER_VALUE * 4} characters")
+    return name, value
 
 
 class Error(Exception):
@@ -67,7 +71,7 @@ class Unauthorized(Error):
         super().__init__(UNAUTHORIZED, message, 401)
         self.resource_metadata = resource_metadata
         self.scope, self.error, self.error_description = scope, error, error_description
-        self.refresh()
+        self.refresh()                      # validates every parameter now
 
     @classmethod
     def invalid(cls, description="The access token is invalid or expired", **k):

@@ -266,10 +266,11 @@ when empty. `Content-Type` must be `application/json` when present.
 
 Guards are predicates over the principal only — they cannot see call arguments,
 so per-record authorization belongs inside the handler. They apply to tools,
-resources, and prompts alike: a guarded tool call is an in-band `isError`; a
-guarded resource or prompt the caller may not use is indistinguishable from one
-that does not exist (`404` / `-32601`), and listings show only what the caller
-may use. A guard that raises denies.
+resources, and prompts alike: a guarded tool, resource, or prompt the caller
+may not use is indistinguishable from one that does not exist (`404` /
+`-32601`), and listings show only what the caller may use. A guard that
+raises denies; a guard that raises `Unauthorized` (or another `Error`) chooses
+the answer when the entry is invoked, and hides it in listings.
 
 **OAuth handoff.** Being an authorization server is out of scope, but the
 handoff to one is not. Raise `Unauthorized` from `authenticate` (or from a
@@ -280,7 +281,11 @@ document at `/.well-known/oauth-protected-resource` (and at the
 path-suffixed form when `path=` is set); the challenge then names that
 document's URL by default, derived at construction from the document's own
 `resource` (its origin plus the well-known path plus its path), never from
-`Host` or a proxy header. A challenge with no URL at all is logged once as a
+`Host` or a proxy header, and the document is served at exactly that path
+(`server.well_known_path`), so the challenge always names something this
+server answers. If an outer router mounts the server under a prefix, requests
+for the well-known path never reach it: give the outer app a route for it, or
+run the server at the root with `path=`. A challenge with no URL at all is logged once as a
 warning: MCP clients cannot start OAuth from a bare `Bearer`. Guards may
 raise `Unauthorized` too, and do so before any byte is committed. A tool that
 raises it after its SSE stream has opened cannot change the status any more;
@@ -344,7 +349,10 @@ Requests without an `id` (JSON-RPC notifications) pass the Origin, Host, and
 Content-Type checks, are acknowledged with `202`, and are never dispatched. Bodies that are not a single JSON-RPC object, including
 batch arrays, are `400` / `-32600`; a repeated `Mcp-*` routing header is
 `-32020` (`Mcp-Method` is compared verbatim; only `Mcp-Name` carries the
-base64 sentinel, decoded exactly as the SDK does); any pagination `cursor` is `-32602` because this server never issues
+base64 sentinel, decoded exactly as the SDK does), and on WSGI, which folds
+duplicates into one comma-joined value, a comma in `MCP-Protocol-Version`,
+`Mcp-Method`, `Authorization`, `Host`, or `Origin` is refused for the same
+reason; any pagination `cursor` is `-32602` because this server never issues
 one. Server identity travels in `result._meta` on every result, as the 2026
 revision expects. Handler exceptions outside `tools/call` are logged
 server-side and answered with a constant `-32603` message.
@@ -386,8 +394,10 @@ capabilities and server identity from the registry every time (echoing a
 requested `2025-11-25` or `2025-06-18`; anything else, including
 `2025-03-26`, whose batch arrays this server refuses, gets `2025-11-25`), the
 initialized notification is `202`, `ping` is `{}`, results carry no
-`resultType`/`ttlMs`/`cacheScope`, responses name the era served in
-`MCP-Protocol-Version`, and GET and DELETE stay `405`. The envelope and the
+`resultType`/`ttlMs`/`cacheScope`, every response (results, errors, and
+SSE streams) names the era served in `MCP-Protocol-Version`, a `-32601`
+travels under `200` because the 2025-era SDK clients read `404` as a
+terminated session, and GET and DELETE stay `405`. The envelope and the
 `Mcp-Method`/`Mcp-Name` routing headers are not required of such requests,
 but when a legacy request does send them they must agree with the body. Note
 for gateways that authorize on `Mcp-Name`: a claim-less request carries no
@@ -428,7 +438,7 @@ conform.py          11 checks against the strict mcp-types wire schema
 interop.py          end-to-end with the official mcp client, 9 assertions
 test_asgi.py        native ASGI under uvicorn and mounted in Starlette
 test_progress.py    40 SSE checks: ordering, cancellation, subscriptions/listen, WSGI degradation
-test_legacy.py      99 checks: legacy="stateless" serving, OAuth handoff, review fixes, both transports
+test_legacy.py      legacy="stateless" serving, OAuth handoff, two review rounds, both transports
 harnesses.py        wsgiref, Flask, Starlette, waitress, gunicorn
 ergonomics.py       API tour, 12 assertions
 test_hardening.py   247 regression checks from four adversarial reviews + UI apps
