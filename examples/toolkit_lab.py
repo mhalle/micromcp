@@ -301,7 +301,7 @@ def _widget(page_html, kit):
 
 
 def lab_mcp():
-    from micromcp import MCP, fragment
+    from micromcp import MCP, Widget, fragment
     from micromcp.contrib.django import django_routes
 
     mcp = MCP("hm-lab", "0.1.0")
@@ -356,6 +356,19 @@ def lab_mcp():
     def lab_results() -> dict:
         """Every toolkit-lab self-test report received so far, newest last."""
         return {"reports": REPORTS}
+
+    # htmx loaded from a CDN: Widget declares the URL's origin in _meta.ui.csp.resourceDomains,
+    # which is what lets a host (and the dev host) allow it.
+    cdn = Widget("lab-cdn", title="Toolkit lab: htmx from a CDN", border=True,
+                 scripts=["https://cdn.jsdelivr.net/npm/htmx.org@4.0.0/dist/htmx.min.js"],
+                 body='<h1>htmx from a CDN</h1><div id="app" hx-post="tool:lab_list?kit=htmx" '
+                      'hx-trigger="mcp:ready" hx-target="#app" hx-swap="innerMorph">'
+                      '<em>loading&hellip;</em></div><small data-mcp-status></small>')
+
+    @mcp.tool(widget=cdn, read_only=True, title="Toolkit lab: htmx from a CDN")
+    def lab_cdn() -> str:
+        """Open a widget that loads htmx from a CDN instead of inlining it."""
+        return "Opened the CDN widget; it lists the htmx variant's items."
 
     django_routes(mcp, prefixes=["/django/lab/"], name="lab_django_http", host="localhost")
     add_counter(mcp)

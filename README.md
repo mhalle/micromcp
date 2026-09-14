@@ -111,18 +111,44 @@ exactly as for tools, and docstring `Args:` become argument descriptions.
 
 ## UI apps (MCP Apps / MCP-UI)
 
-A host that renders UI needs three things from a server, and all three are
-plain registration options:
+A widget is a static HTML page the host renders in a sandboxed iframe next to
+the conversation. Declare it once as a `Widget` and attach it to the tools
+that show it:
 
 ```python
-from micromcp import MCP, ASGIServer, result, embedded_resource
+from pathlib import Path
+from micromcp import MCP, Widget, fragment
 
-HTML = open("widget.html").read()          # static: no guards, no templates, no user data
+board = Widget("todos", title="Todos", scripts=[Path("htmx.min.js")], body="""
+    <div id="app" hx-post="tool:todo_list" hx-trigger="mcp:ready" hx-target="#app"></div>""")
 
+@mcp.tool(widget=board, read_only=True)       # the model calls this; the host shows the widget
+def show_todos() -> str:
+    return f"{todos.open_count()} open todos"
+
+@mcp.tool(visibility="app")                   # the widget calls this; the model never sees it
+def todo_list():
+    return fragment(render(todos))            # HTML for the widget; escape what you interpolate
+```
+
+`Widget(name, ...)` builds the page around `BRIDGE_JS` — or takes `html=` for
+a complete document of your own — and the first tool that names it registers
+it as `ui://<name>` with the MCP App MIME type and fills in the tool's
+`_meta` (`ui.resourceUri`, plus the legacy `ui/resourceUri` key). Assets in
+`scripts=`, `modules=`, and `styles=` are source text, `pathlib.Path`s
+(inlined), or https URLs (loaded; their origins are declared in the
+resource's `_meta.ui.csp.resourceDomains` for you — verified in the dev host,
+not yet in Claude). `csp=` adds origins, `border=` sets `prefersBorder`,
+`route=` and `fetch=` are covered below.
+
+Under the hood a widget is a resource and a pointer to it, and both can be
+written by hand:
+
+```python
 @mcp.resource("ui://crash-widget",         # mime defaults to text/html;profile=mcp-app
-              meta={"ui": {"prefersBorder": True, "csp": {"resourceDomains": []}}})
+              meta={"ui": {"prefersBorder": True}})
 def crash_widget() -> str:
-    return HTML
+    return HTML                            # static: no guards, no templates, no user data
 
 @mcp.tool(meta={"ui": {"resourceUri": "ui://crash-widget"}})   # published as the tool's _meta
 def show_crashes(street: str) -> dict:
@@ -180,30 +206,28 @@ with an HTML fragment that is swapped in. The widget has no app logic and no
 network access; all state stays on the server.
 
 ```python
-from micromcp import fragment, page
-
-WIDGET = page('<div id="app" hx-post="tool:todo_list" hx-trigger="mcp:ready" '
-              'hx-target="#app"></div>', title="Todos", scripts=[HTMX_JS])
-
 @mcp.tool(visibility="app")                     # hidden from the model, callable by the widget
 def todo_add(text: str = ""):
     todos.add(text)
-    return fragment(render(todos))              # escape what you interpolate
+    return fragment(render(todos))
 ```
 
-`page()` inlines `BRIDGE_JS`, which completes the MCP Apps handshake and gives
-`fetch()`-shaped requests a tool-call transport (`mcp.fetch`): `tool:name?a=1`
-calls that tool with the query, form, or JSON body as arguments. It is wired
-into htmx 4 (`ctx.fetch`) and fixi (`fx:config`), and replaces `window.fetch`
-for libraries without a hook when the page has `<meta name="mcp-fetch"
-content="global">`. Any other URL goes to the tool named by `<meta
-name="mcp-route">` — which is how existing Django views serve a widget:
+The bridge completes the MCP Apps handshake and gives `fetch()`-shaped
+requests a tool-call transport (`mcp.fetch`): `tool:name?a=1` calls that tool
+with the query, form, or JSON body as arguments. It is wired into htmx 4
+(`ctx.fetch`) and fixi (`fx:config`); `Widget(fetch="global")` also replaces
+`window.fetch`, for libraries without a hook (Datastar). With htmx, call
+tools with `hx-post`: htmx rewrites a GET URL to its path, dropping `tool:`.
+Any other URL goes to the widget's `route=` tool — which is how existing
+Django views serve a widget:
 
 ```python
-from micromcp import django_routes
-django_routes(mcp, prefixes=["/app/"])          # registers the app-only tool "django_http"
-# widget: <meta name="mcp-route" content="django_http">
-#         <button hx-post="/app/todos/add/" hx-target="#app">Add</button>
+from micromcp import Widget, django_routes
+
+board = Widget("todos", scripts=[Path("htmx.min.js")],
+               route=django_routes(mcp, prefixes=["/app/"]),    # registers "django_http"
+               body='<div id="app" hx-get="/app/todos/" hx-trigger="mcp:ready" '
+                    'hx-target="#app"></div>')
 ```
 
 `django_routes` runs each request through Django's full handler in process
@@ -253,8 +277,9 @@ Apps. Treat context as data: anything users wrote reaches the model.
 ### The dev host
 
 `examples/devhost.html` is a stand-in MCP Apps host for development: it reads
-a tool's `ui://` widget, renders it in a sandboxed iframe under the spec's
-default policy (`?csp=eval` adds `unsafe-eval`), completes the handshake,
+a tool's `ui://` widget, renders it in a sandboxed iframe under the policy a
+host derives from the widget's `_meta.ui.csp` (the spec's default plus the
+declared origins; `?csp=eval` adds `unsafe-eval`), completes the handshake,
 proxies the widget's `tools/call` for tools whose visibility includes `app`,
 and shows what the model would receive. `python examples/mcp_app_hypermedia.py`
 serves it at `http://127.0.0.1:8770/devhost?mcp=/mcp` next to the demos (the

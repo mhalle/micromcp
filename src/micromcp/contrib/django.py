@@ -119,6 +119,8 @@ def django_routes(mcp, *, prefixes, name: str = "django_http", host: str = "loca
     request's authenticated principal is set as `request.mcp_principal`, and
     CSRF checks are off because nothing ambient authenticates the request.
     `host` is the Host the views see: it must pass `ALLOWED_HOSTS`.
+
+    Returns the tool's name, for `Widget(route=django_routes(mcp, prefixes=[...]))`.
     """
     import posixpath
     import threading
@@ -242,4 +244,4 @@ def django_routes(mcp, *, prefixes, name: str = "django_http", host: str = "loca
 
     mcp.tool(route, name=name, guards=guards, visibility=visibility,
              title="Django views for the MCP App")
-    return route
+    return name

@@ -7,13 +7,14 @@ the README); here it is syntax-checked when node is installed.
 import io
 import json
 import os
+import pathlib
 import shutil
 import subprocess
 import sys
 import tempfile
 
 from micromcp import (BRIDGE_JS, CONTEXT_META, META_CAPS, META_SERVER, META_VER, MCP, PROTOCOL,
-                      Server, django_routes, fragment, page, set_mcp_context)
+                      Server, Widget, django_routes, fragment, page, set_mcp_context)
 
 OK = FAIL = 0
 
@@ -47,8 +48,8 @@ def client(mcp, authenticate=None):
         env = {"REQUEST_METHOD": "POST", "CONTENT_LENGTH": str(len(raw)),
                "wsgi.input": io.BytesIO(raw),
                "HTTP_MCP_PROTOCOL_VERSION": PROTOCOL, "HTTP_MCP_METHOD": method}
-        if params.get("name"):
-            env["HTTP_MCP_NAME"] = params["name"]
+        if params.get("name") or params.get("uri"):
+            env["HTTP_MCP_NAME"] = params.get("name") or params["uri"]
         if auth:
             env["HTTP_AUTHORIZATION"] = auth
         box = {}
@@ -239,6 +240,95 @@ if django:
           raises(lambda: django_routes(MCP("x"), prefixes=["app"])), "ValueError")
     check("prefixes must not be empty", raises(lambda: django_routes(MCP("x"), prefixes=[])),
           "ValueError")
+
+# ── Widget ─────────────────────────────────────────────────────────────────
+print("Widget")
+lib = pathlib.Path(tempfile.mkdtemp()) / "lib.js"
+lib.write_text("window.libLoaded = 1;")
+w = Widget("board", title="Board", body='<div id="app"></div>', styles="body{margin:0}",
+           scripts=[lib, "https://cdn.example.org/x/htmx.min.js"],
+           modules=["https://esm.example.net/ds.js"], route="django_http", fetch="global",
+           csp={"connectDomains": ["https://api.example.org"]}, border=True)
+doc = w.html
+check("uri defaults to ui://<name>", w.uri, "ui://board")
+check("route and fetch metas come before the bridge runs",
+      doc.index('name="mcp-route" content="django_http"') < doc.index(BRIDGE_JS)
+      and doc.index('name="mcp-fetch" content="global"') < doc.index(BRIDGE_JS), True)
+check("a Path script is read and inlined after the bridge",
+      doc.index(BRIDGE_JS) < doc.index("<script>window.libLoaded = 1;</script>"), True)
+check("an https script loads by src",
+      '<script src="https://cdn.example.org/x/htmx.min.js"></script>' in doc, True)
+check("an https module loads as type=module",
+      '<script type="module" src="https://esm.example.net/ds.js"></script>' in doc, True)
+check("styles are inlined", "<style>body{margin:0}</style>" in doc, True)
+check("resource meta: asset origins declared, csp merged, border set", w.meta,
+      {"ui": {"csp": {"connectDomains": ["https://api.example.org"],
+                      "resourceDomains": ["https://cdn.example.org", "https://esm.example.net"]},
+              "prefersBorder": True}})
+check("html= is used verbatim", Widget("own", html="<p>mine</p>").html, "<p>mine</p>")
+check("no csp and no border means no resource meta", Widget("plain", body="x").meta, None)
+for label, make, exc in [
+        ("neither body nor html", lambda: Widget("x"), TypeError),
+        ("both body and html", lambda: Widget("x", body="a", html="b"), TypeError),
+        ("html with page options", lambda: Widget("x", html="<p>", scripts=["a"]), TypeError),
+        ("a name with spaces", lambda: Widget("no spaces", body="x"), ValueError),
+        ("a uri that is not ui://", lambda: Widget("x", body="x", uri="https://x"), ValueError),
+        ("an unknown fetch mode", lambda: Widget("x", body="x", fetch="all"), ValueError),
+        ("an unknown csp key", lambda: Widget("x", body="x", csp={"scriptDomains": []}), ValueError),
+        ("a csp value that is a str", lambda: Widget("x", body="x", csp={"connectDomains": "https://a"}),
+         ValueError),
+        ("an http script", lambda: Widget("x", body="x", scripts=["http://insecure.example/a.js"]),
+         ValueError),
+        ("a path passed as a str", lambda: Widget("x", body="x", scripts=["vendor/htmx.min.js"]),
+         ValueError),
+        ("a script that closes its tag", lambda: Widget("x", body="x", scripts=["a</script>b"]),
+         ValueError),
+        ("a style that closes its tag", lambda: Widget("x", body="x", styles=["a</style>"]), ValueError),
+        ("a route that is not a tool name", lambda: Widget("x", body="x", route="no spaces!"), ValueError),
+        ("a script of the wrong type", lambda: Widget("x", body="x", scripts=[42]), TypeError)]:
+    check(f"Widget refused: {label}", raises(make, exc), exc.__name__)
+
+wm = MCP("widget-test")
+
+
+@wm.tool(widget=w, read_only=True)
+def show_board() -> str:
+    """Show the board."""
+    return "ok"
+
+
+@wm.tool(widget=w, visibility=["model", "app"])
+def show_board_too() -> str:
+    """Show the board again."""
+    return "ok"
+
+
+wrpc = client(wm)
+wt = {t["name"]: t["_meta"] for t in wrpc("tools/list")[1]["result"]["tools"]}
+check("tool(widget=) names the resource under both keys",
+      wt["show_board"], {"ui": {"resourceUri": "ui://board"}, "ui/resourceUri": "ui://board"})
+check("widget= and visibility= merge", wt["show_board_too"]["ui"],
+      {"resourceUri": "ui://board", "visibility": ["model", "app"]})
+listed = wrpc("resources/list")[1]["result"]["resources"]
+check("two tools, one resource, with the MCP App MIME type",
+      [(r["uri"], r["mimeType"]) for r in listed], [("ui://board", "text/html;profile=mcp-app")])
+check("the listing carries the widget's meta", listed[0].get("_meta"), w.meta)
+read = wrpc("resources/read", {"uri": "ui://board"})[1]["result"]["contents"][0]
+check("resources/read returns the page", read["text"], w.html)
+check("a different widget at the same uri is refused",
+      raises(lambda: wm.tool(lambda: 1, name="other", widget=Widget("board", body="other"))),
+      "ValueError")
+check("a refused tool registers nothing", "other" in wm.tools, False)
+check("meta naming another resource conflicts with widget=",
+      raises(lambda: wm.tool(lambda: 1, name="x3", widget=w,
+                             meta={"ui": {"resourceUri": "ui://elsewhere"}})), "ValueError")
+check("a widget must be a Widget",
+      raises(lambda: wm.tool(lambda: 1, name="x4", widget="ui://board"), TypeError), "TypeError")
+check("one widget can serve several servers",
+      raises(lambda: MCP("second").tool(lambda: 1, name="y", widget=w)), None)
+if django:
+    check("django_routes returns its tool name, for Widget(route=)",
+          django_routes(MCP("named"), prefixes=["/app/"]), "django_http")
 
 print(f"\n{OK} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

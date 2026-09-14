@@ -1,26 +1,38 @@
-"""MCP Apps helpers: a widget bridge and hypermedia fragments.
+"""MCP Apps: widgets, hypermedia fragments, and talking to the model.
 
 An MCP Apps widget is a static HTML page the host renders in a sandboxed
 iframe. It talks to the host over postMessage JSON-RPC, and the host proxies
-its `tools/call` requests to this server. `page()` builds such a widget with
-`BRIDGE_JS` inlined; the bridge completes the handshake and, when a
-fixi-style hypermedia library is on the page, routes its requests through
-tool calls instead of HTTP:
+its `tools/call` requests to this server. A `Widget` is that page plus its
+`ui://` resource; attach it to the tools that show it:
 
-    <button fx-action="tool:todo_add" fx-target="#app">Add</button>
+    board = Widget("todos", title="Todos", scripts=[Path("htmx.min.js")], body=
+        '<div id="app" hx-post="tool:todo_list" hx-trigger="mcp:ready" hx-target="#app"></div>')
 
-calls the tool `todo_add` with the enclosing form's fields as arguments and
-swaps the tool's text result into `#app`. A tool built for this returns
-`fragment(html)` and is usually registered with `visibility="app"`, so the
-host hides it from the model and its HTML never enters the model's context.
-Any other `fx-action` (a URL path) is sent to the route tool named by
-`<meta name="mcp-route" content="...">` — see `contrib.django.django_routes`.
+    @mcp.tool(widget=board)                 # registers ui://todos, fills in the tool's _meta
+    def show_todos() -> str: ...
+
+    @mcp.tool(visibility="app")             # hidden from the model, callable by the widget
+    def todo_list(): return fragment(render())
+
+The page carries `BRIDGE_JS`, which completes the handshake and gives
+hypermedia libraries a tool-call transport: `hx-post="tool:todo_add"` calls
+the tool `todo_add` with the form's fields as arguments and swaps its
+`fragment()` into the page. Other URLs go to the `route=` tool, which is how
+Django views serve a widget (`contrib.django.django_routes`). In the page,
+`mcp.setContext(text, data)` and `mcp.say(text)` talk to the model; from the
+server, `fragment(..., context=...)` does.
 """
 
 from __future__ import annotations
 
+import html as _html
 import json
+import os
+import pathlib
+import re
+from urllib.parse import urlsplit
 
+from ._constants import _NAME_RE
 from .core import Result, result
 
 FRAGMENT_META = "micromcp/http"
@@ -233,18 +245,173 @@ BRIDGE_JS = r"""
 """  # noqa: E501
 
 
-def page(body: str, *, title: str = "", head: str = "", scripts=()) -> str:
-    """A complete widget document: `BRIDGE_JS`, then each source in `scripts`
-    (a hypermedia library such as fixi, your own code), inlined in order, then
-    `body`. Serve it from a static `ui://` resource; inline everything, since
-    the sandbox's default CSP loads nothing from the network."""
-    import html as _html
-    for s in (BRIDGE_JS, *scripts):
-        if "</script" in s.lower():
-            raise ValueError("an inlined script contains '</script'; it would end the tag early")
-    tags = "".join(f"<script>{s}</script>" for s in (BRIDGE_JS, *scripts))
-    return (f'<!doctype html><html><head><meta charset="utf-8">'
-            f"<title>{_html.escape(title)}</title>{head}{tags}</head><body>{body}</body></html>")
+_HTTPS_RE = re.compile(r"https://[^\s\"'<>]+")
+_PATHLIKE_RE = re.compile(r"[\w./-]+\.(?:m?js|css)")
+_WIDGET_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+_CSP_KEYS = ("connectDomains", "resourceDomains", "frameDomains", "baseUriDomains")
+
+
+def _items(value):
+    return [value] if isinstance(value, (str, os.PathLike)) else list(value or ())
+
+
+def _asset(item, what):
+    """An asset is inline source (str), a file (Path), or an https URL (str).
+    Returns (href, origin) for a URL, (text, None) for source."""
+    if isinstance(item, os.PathLike):
+        return pathlib.Path(item).read_text(encoding="utf-8"), None
+    if not isinstance(item, str):
+        raise TypeError(f"{what} must be source text, a pathlib.Path, or an https URL")
+    if _HTTPS_RE.fullmatch(item):
+        u = urlsplit(item)
+        return item, f"{u.scheme}://{u.netloc}"
+    if item.startswith("http://"):
+        raise ValueError(f"{what} {item!r}: widgets load only https URLs")
+    if _PATHLIKE_RE.fullmatch(item):
+        raise ValueError(f"{what} {item!r} looks like a file name; pass pathlib.Path({item!r}) "
+                         f"to inline the file, or an https URL to load it")
+    return item, None
+
+
+def _script(source, module=False):
+    if "</script" in source.lower():
+        raise ValueError("an inlined script contains '</script'; it would end the tag early")
+    kind = ' type="module"' if module else ""
+    return f"<script{kind}>{source}</script>"
+
+
+def _document(body, *, title, head, scripts, modules, styles, route, fetch):
+    """The widget page and the https origins it loads from."""
+    if not isinstance(body, str):
+        raise TypeError("body must be a str")
+    if fetch not in ("hooks", "global"):
+        raise ValueError("fetch must be 'hooks' (htmx, fixi) or 'global' (replace window.fetch)")
+    if route is not None and (not isinstance(route, str) or not _NAME_RE.match(route)):
+        raise ValueError(f"route must be a tool name, got {route!r}")
+    origins = set()
+    parts = ['<meta charset="utf-8">', f"<title>{_html.escape(title)}</title>"]
+    if route:
+        parts.append(f'<meta name="mcp-route" content="{_html.escape(route)}">')
+    if fetch == "global":
+        parts.append('<meta name="mcp-fetch" content="global">')
+    for item in _items(styles):
+        text, origin = _asset(item, "style")
+        if origin:
+            origins.add(origin)
+            parts.append(f'<link rel="stylesheet" href="{_html.escape(text)}">')
+        elif "</style" in text.lower():
+            raise ValueError("an inlined style contains '</style'; it would end the tag early")
+        else:
+            parts.append(f"<style>{text}</style>")
+    parts += [head, _script(BRIDGE_JS)]
+    for module, group in ((False, scripts), (True, modules)):
+        for item in _items(group):
+            text, origin = _asset(item, "module" if module else "script")
+            if origin:
+                origins.add(origin)
+                kind = ' type="module"' if module else ""
+                parts.append(f'<script{kind} src="{_html.escape(text)}"></script>')
+            else:
+                parts.append(_script(text, module))
+    return ("<!doctype html><html><head>" + "".join(parts) + "</head><body>" + body
+            + "</body></html>"), origins
+
+
+def page(body: str, *, title: str = "", head: str = "", scripts=(), modules=(), styles=(),
+         route: str | None = None, fetch: str = "hooks") -> str:
+    """A complete widget document around `body`: `styles`, `head`, `BRIDGE_JS`,
+    then `scripts` and `modules` in order. Each asset is source text, a
+    `pathlib.Path` (inlined), or an https URL (loaded; the host must allow its
+    origin — `Widget` declares that for you). `route` names the tool that
+    serves non-`tool:` URLs; `fetch="global"` lets libraries without a hook
+    (Datastar) reach tools through `window.fetch`. Most code wants `Widget`."""
+    return _document(body, title=title, head=head, scripts=scripts, modules=modules,
+                     styles=styles, route=route, fetch=fetch)[0]
+
+
+class Widget:
+    """An MCP Apps widget: a static page, published as a `ui://` resource and
+    shown by the tools it is attached to with `@mcp.tool(widget=...)`.
+
+        Widget("todos", body="...", scripts=[Path("htmx.min.js")])   # a page around the bridge
+        Widget("chart", html=open("chart.html").read())              # your own complete document
+
+    name     the resource is `ui://<name>` unless `uri=` says otherwise
+    title    the page title and the resource title
+    body / scripts / modules / styles / head / route / fetch
+             build the page with `page()`; https URLs among the assets become
+             `csp.resourceDomains` entries automatically
+    html     a complete document used verbatim (bring your own bridge)
+    csp      extra `_meta.ui.csp` origins: connectDomains, resourceDomains,
+             frameDomains, baseUriDomains
+    border   `_meta.ui.prefersBorder`
+
+    Widgets are static: hosts fetch them under their own identity and cache
+    them per connector, so a changed page needs a new connector to show up.
+    Per-user data belongs in tool results and fragments.
+    """
+
+    def __init__(self, name: str, *, body: str | None = None, html: str | None = None,
+                 title: str = "", scripts=(), modules=(), styles=(), head: str = "",
+                 route: str | None = None, fetch: str = "hooks", csp: dict | None = None,
+                 border: bool | None = None, uri: str | None = None):
+        if not isinstance(name, str) or not _WIDGET_NAME_RE.fullmatch(name):
+            raise ValueError(f"widget name {name!r}: letters, digits, '.', '_' and '-' only")
+        self.name, self.title = name, title or name
+        self.uri = f"ui://{name}" if uri is None else uri
+        if not isinstance(self.uri, str) or not self.uri.startswith("ui://") or "{" in self.uri:
+            raise ValueError(f"widget uri {self.uri!r} must be a plain ui:// URI")
+        if (body is None) == (html is None):
+            raise TypeError("Widget: give body= (a page built around the bridge) or html= "
+                            "(a complete document of your own), not both")
+        if html is not None:
+            if scripts or modules or styles or head or route or fetch != "hooks":
+                raise TypeError("Widget(html=...) is used verbatim; scripts/modules/styles/"
+                                "head/route/fetch apply only to body=")
+            if not isinstance(html, str):
+                raise TypeError("html must be a str")
+            self.html, origins = html, set()
+        else:
+            self.html, origins = _document(body, title=self.title, head=head, scripts=scripts,
+                                           modules=modules, styles=styles, route=route,
+                                           fetch=fetch)
+        domains = {}
+        for k, v in (csp or {}).items():
+            if k not in _CSP_KEYS:
+                raise ValueError(f"csp key {k!r}; expected one of {', '.join(_CSP_KEYS)}")
+            if isinstance(v, str) or not all(isinstance(d, str) and d for d in v):
+                raise ValueError(f"csp {k} must be a list of origins")
+            domains[k] = list(v)
+        if origins:
+            domains["resourceDomains"] = sorted(set(domains.get("resourceDomains", ())) | origins)
+        ui = {}
+        if domains:
+            ui["csp"] = domains
+        if border is not None:
+            ui["prefersBorder"] = bool(border)
+        self.meta = {"ui": ui} if ui else None
+
+    def __repr__(self):
+        return f"Widget({self.name!r}, uri={self.uri!r})"
+
+    def _attach(self, mcp) -> str:
+        """Register this widget's resource on `mcp` once; refuse a different
+        resource already at the same URI."""
+        entry = mcp.resources.get(self.uri)
+        if entry is not None:
+            if getattr(entry.get("_fn"), "__micromcp_widget__", None) is self:
+                return self.uri
+            raise ValueError(f"resource {self.uri!r} is already registered; give this widget "
+                             f"another name or uri=")
+        doc = self.html
+
+        def widget() -> str:
+            return doc
+        widget.__name__ = re.sub(r"\W", "_", self.name) + "_widget"
+        widget.__doc__ = f"MCP Apps widget {self.title!r}."
+        widget.__micromcp_widget__ = self
+        mcp.resource(self.uri, title=self.title, meta=self.meta)(widget)
+        return self.uri
 
 
 def _context(context) -> dict:
@@ -289,4 +456,4 @@ def fragment(html: str, *, status: int = 200,
     return result([{"type": "text", "text": html}], is_error=status >= 400, meta=meta)
 
 
-__all__ = ["BRIDGE_JS", "CONTEXT_META", "FRAGMENT_META", "fragment", "page"]
+__all__ = ["BRIDGE_JS", "CONTEXT_META", "FRAGMENT_META", "Widget", "fragment", "page"]
