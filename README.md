@@ -172,6 +172,95 @@ fetch, so a changed widget needs a new connector identity to be picked up.
 The reference servers still emit the deprecated flat `ui/resourceUri` key
 alongside `ui.resourceUri`; the example does the same until hosts drop it.
 
+### Hypermedia widgets: htmx, fixi, Django views
+
+A widget can be a static page whose HTML the server renders: every click
+becomes a `tools/call` the host proxies to this server, and the tool answers
+with an HTML fragment that is swapped in. The widget has no app logic and no
+network access; all state stays on the server.
+
+```python
+from micromcp import fragment, page
+
+WIDGET = page('<div id="app" hx-post="tool:todo_list" hx-trigger="mcp:ready" '
+              'hx-target="#app"></div>', title="Todos", scripts=[HTMX_JS])
+
+@mcp.tool(visibility="app")                     # hidden from the model, callable by the widget
+def todo_add(text: str = ""):
+    todos.add(text)
+    return fragment(render(todos))              # escape what you interpolate
+```
+
+`page()` inlines `BRIDGE_JS`, which completes the MCP Apps handshake and gives
+`fetch()`-shaped requests a tool-call transport (`mcp.fetch`): `tool:name?a=1`
+calls that tool with the query, form, or JSON body as arguments. It is wired
+into htmx 4 (`ctx.fetch`) and fixi (`fx:config`), and replaces `window.fetch`
+for libraries without a hook when the page has `<meta name="mcp-fetch"
+content="global">`. Any other URL goes to the tool named by `<meta
+name="mcp-route">` — which is how existing Django views serve a widget:
+
+```python
+from micromcp import django_routes
+django_routes(mcp, prefixes=["/app/"])          # registers the app-only tool "django_http"
+# widget: <meta name="mcp-route" content="django_http">
+#         <button hx-post="/app/todos/add/" hx-target="#app">Add</button>
+```
+
+`django_routes` runs each request through Django's full handler in process
+(URL resolver, middleware, views, templates), follows same-host redirects,
+forwards `HX-*`/`FX-*`/`Datastar-*` headers so `django-htmx` works, and serves
+only paths under `prefixes` (after decoding and normalization). The request
+carries no cookies: the MCP principal is `request.mcp_principal`, and CSRF is
+off because nothing ambient authenticates the request. `fragment()` results
+from app-only tools reach only the widget, never the model's context.
+
+Verified 2026-09-14 in the Claude chat with nine self-testing widgets
+(`examples/toolkit_lab.py`): fixi, htmx 4, htmx 4 + Django views, htmx 4 +
+Alpine's CSP build (state survives `innerMorph`), Datastar, and hx-live all
+work. Claude's widget policy allows `eval` and inline-script injection; the
+MCP Apps spec's default does not, and under it stock hx-live and stock
+Datastar fail while everything above in eval-free form (Datastar's CSP mode,
+hx-live with an injection extension) passes. htmx's `hx-csp` extension does
+not work over this transport: it strips every element that arrives in a
+fragment, because a synthesized `Response` has no URL to verify.
+
+### Telling the model what the user sees
+
+A widget is opaque to the model, but it can report to it:
+
+```python
+return fragment(render(todos), context={
+    "text": f"Todo widget, current state: {n_open} open, {n_done} done.",
+    "data": {"items": [...]}})
+```
+
+The bridge forwards `context` as `ui/update-model-context`; the model sees it
+on its next turn, and no turn is started. In the browser, `mcp.setContext(text,
+data)` does the same for client-side state (debounced), and `mcp.say(text)` or
+`<button data-mcp-say="...">` posts a message into the chat as the user,
+which does start a turn. From Django, `set_mcp_context(response, text, data)`
+on any response in a redirect chain has the same effect.
+
+What Claude did with them on 2026-09-14: each update **replaces** the
+widget's previous one (as the spec says), while separate widgets keep separate
+contexts — so send a snapshot of the view, not a change; the model saw only
+the **text** of an update, never `structuredContent`, so the bridge also sends
+`data` as a labeled JSON text block; and `ui/message` needed `content` as an
+array of blocks (the spec shows one block), so the bridge tries that first.
+None of this happens in the Claude Code desktop tab, which does not render MCP
+Apps. Treat context as data: anything users wrote reaches the model.
+
+### The dev host
+
+`examples/devhost.html` is a stand-in MCP Apps host for development: it reads
+a tool's `ui://` widget, renders it in a sandboxed iframe under the spec's
+default policy (`?csp=eval` adds `unsafe-eval`), completes the handshake,
+proxies the widget's `tools/call` for tools whose visibility includes `app`,
+and shows what the model would receive. `python examples/mcp_app_hypermedia.py`
+serves it at `http://127.0.0.1:8770/devhost?mcp=/mcp` next to the demos (the
+todo widget with tools and with Django views, the toolkit lab, and the context
+counter).
+
 ## Injected parameters
 
 Two annotations are filled server-side and excluded from the input schema, so
