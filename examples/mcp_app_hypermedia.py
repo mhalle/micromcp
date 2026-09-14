@@ -224,6 +224,7 @@ def build(devhost: bool = False):
     ctx_mcp = MCP("hm-context", "0.1.0")          # the counter alone, as its own connector
     toolkit_lab.add_counter(ctx_mcp)
     ctx = ASGIServer(ctx_mcp, path="/ctx/mcp", allowed_origins=ORIGINS)
+    cdn = ASGIServer(toolkit_lab.cdn_mcp(), path="/cdn/mcp", allowed_origins=ORIGINS)
     dev = (HERE / "devhost.html").read_bytes() if devhost else None
 
     async def app(scope, receive, send):
@@ -244,6 +245,8 @@ def build(devhost: bool = False):
             return await lab(scope, receive, send)
         if p.startswith("/ctx/"):
             return await ctx(scope, receive, send)
+        if p.startswith("/cdn/"):
+            return await cdn(scope, receive, send)
         if dev and p == "/devhost":
             await send({"type": "http.response.start", "status": 200,
                         "headers": [(b"content-type", b"text/html; charset=utf-8")]})

@@ -137,8 +137,10 @@ it as `ui://<name>` with the MCP App MIME type and fills in the tool's
 `_meta` (`ui.resourceUri`, plus the legacy `ui/resourceUri` key). Assets in
 `scripts=`, `modules=`, and `styles=` are source text, `pathlib.Path`s
 (inlined), or https URLs (loaded; their origins are declared in the
-resource's `_meta.ui.csp.resourceDomains` for you — verified in the dev host,
-not yet in Claude). `csp=` adds origins, `border=` sets `prefersBorder`,
+resource's `_meta.ui.csp.resourceDomains` for you). Claude enforces that
+declaration: on 2026-09-14 htmx loaded from jsdelivr in a `Widget`, and the
+same page without the declaration was blocked (`script-src-elem`), exactly
+as in the dev host. `csp=` adds origins, `border=` sets `prefersBorder`,
 `route=` and `fetch=` are covered below.
 
 Under the hood a widget is a resource and a pointer to it, and both can be
