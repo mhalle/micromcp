@@ -970,6 +970,9 @@ def round2():
     @slow_auth.tool
     def fast() -> dict:
         return {"ok": True}
+    @slow_auth.tool
+    def long_nap() -> dict:
+        time.sleep(3); return {"ok": True}      # far past the 0.2s timeout below: no race
     def auth_sleep(h):
         time.sleep(0.2); return {"sub": "x"}
     big_pool = ASGIServer(slow_auth, workers=64, authenticate=auth_sleep)
@@ -1008,8 +1011,9 @@ def round2():
 
     timed = Server(slow_auth, timeout=0.2)
     t0 = time.time()
-    s, r = call(timed, "nap", {})
-    check(f"WSGI timeout fails loudly with 500 ({time.time()-t0:.2f}s)", (s, r["error"]["code"]), (500, -32603))
+    s, r = call(timed, "long_nap", {})
+    check(f"WSGI timeout fails loudly with 500 ({time.time()-t0:.2f}s)",
+          (s, r.get("error", {}).get("code", "no error")), (500, -32603))
 
     print("— F3 abandoned sync handler is logged; ctx.cancelled visible —")
     seen = []
