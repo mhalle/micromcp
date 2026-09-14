@@ -17,7 +17,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PKG = ROOT / "src" / "micromcp"
 ORDER = ["_constants", "errors", "markers", "docstrings", "schema", "registry",
-         "core", "wsgi", "asgi", "contrib/django"]
+         "core", "apps", "wsgi", "asgi", "contrib/django"]
 
 
 def _strip(src: str, *, docstring: bool, relative_imports: bool, all_: bool) -> str:

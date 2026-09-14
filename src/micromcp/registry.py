@@ -142,7 +142,8 @@ class MCP:
 
     def tool(self, fn=None, *, name=None, title=None, guards=(),
              annotations=None, output_schema=None, read_only=None,
-             destructive=None, idempotent=None, replace=False, meta=None):
+             destructive=None, idempotent=None, replace=False, meta=None,
+             visibility=None):
         """Register a tool.
 
         title       human-readable label for UIs
@@ -156,6 +157,10 @@ class MCP:
         replace     allow re-registering an existing name (default: error)
         meta        published as the tool's `_meta` (e.g. an MCP Apps
                     `{"ui": {"resourceUri": "ui://..."}}` pointer)
+        visibility  MCP Apps audience: "model", "app", or both (the spec's
+                    default). An app-only tool is hidden from the model by
+                    the host and callable by the server's widgets; it is still
+                    an ordinary tool to any other client, so guard it.
 
         Arguments are validated against the generated schema and converted to
         the declared Python types (dates, enums, sets, dataclasses, pydantic
@@ -182,6 +187,18 @@ class MCP:
                 entry["annotations"] = ann
             if meta:
                 entry["_meta_out"] = _meta_ok(meta, f"tool {n!r}")
+            if visibility is not None:
+                vis = [visibility] if isinstance(visibility, str) else list(visibility)
+                if not vis or len(set(vis)) != len(vis) \
+                        or any(v not in ("model", "app") for v in vis):
+                    raise ValueError(f"tool {n!r}: visibility must be 'model', 'app', or both")
+                out = entry.setdefault("_meta_out", {})
+                ui = out.get("ui", {})
+                if not isinstance(ui, dict):
+                    raise ValueError(f"tool {n!r}: meta 'ui' must be a dict to add visibility")
+                if "visibility" in ui and ui["visibility"] != vis:
+                    raise ValueError(f"tool {n!r}: visibility= conflicts with meta ui.visibility")
+                out["ui"] = {**ui, "visibility": vis}
             out = _output_schema(f, output_schema)
             if out:
                 entry["outputSchema"] = out
