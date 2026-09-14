@@ -12,6 +12,12 @@ META_VER = "io.modelcontextprotocol/protocolVersion"
 META_CAPS = "io.modelcontextprotocol/clientCapabilities"
 META_SERVER = "io.modelcontextprotocol/serverInfo"
 META_SUB = "io.modelcontextprotocol/subscriptionId"
+META_CLIENT = "io.modelcontextprotocol/clientInfo"
+# Handshake-era revisions served, per request and without sessions, when a
+# server is built with legacy="stateless". Newest first: it is the answer to
+# an initialize naming a version we do not know.
+LEGACY_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
+WELL_KNOWN = "/.well-known/oauth-protected-resource"   # RFC 9728
 
 # JSON-RPC / MCP error codes
 PARSE_ERROR = -32700
@@ -21,9 +27,10 @@ INVALID_PARAMS = -32602
 INTERNAL_ERROR = -32603
 HEADER_MISMATCH = -32020         # spec-allocated
 UNSUPPORTED_VERSION = -32022     # spec-allocated; must carry data.supported + data.requested
+UNAUTHORIZED = -32001            # implementation-defined range; travels under HTTP 401
 
 # Methods that exist only in the initialize-handshake era (2024-11-05 .. 2025-11-25).
-# This server does not implement them; it names them so it can refuse precisely.
+# Refused precisely by default; answered per request under legacy="stateless".
 HANDSHAKE_METHODS = frozenset({"initialize", "notifications/initialized", "ping"})
 LIST_METHODS = frozenset({"tools/list", "resources/list", "resources/templates/list",
                           "prompts/list"})

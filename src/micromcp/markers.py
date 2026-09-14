@@ -45,6 +45,13 @@ class Context:
         return dict(self._meta.get("io.modelcontextprotocol/clientCapabilities") or {})
 
     @property
+    def client_info(self) -> dict:
+        """`_meta["io.modelcontextprotocol/clientInfo"]` (name/version), when the
+        client sent it; empty for a 2025-era client, whose identity travelled in
+        an initialize this stateless server did not keep."""
+        return dict(self._meta.get("io.modelcontextprotocol/clientInfo") or {})
+
+    @property
     def streaming(self) -> bool:
         """False when nothing is listening (WSGI, or a client sending no token)."""
         return self._emit is not None

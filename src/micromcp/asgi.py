@@ -38,19 +38,23 @@ class ASGIServer(_Core):
         names = [k.decode("latin-1").lower() for k, _ in scope.get("headers", [])]
         headers = {k.decode("latin-1").lower(): v.decode("latin-1")
                    for k, v in scope.get("headers", [])}
+        headers[":scheme"] = scope.get("scheme") or "http"
 
-        async def reply(status, payload):
+        async def reply(status, payload, extra=()):
             status, data = _encode(status, payload)
             hdrs = [(b"content-length", str(len(data)).encode())]
             if data:
                 hdrs.insert(0, (b"content-type", b"application/json"))
             hdrs += [(k.lower().encode(), v.encode())
                      for k, v in self.extra_headers(http_method, headers, status)]
+            hdrs += [(k.lower().encode(), v.encode()) for k, v in extra]
             await send({"type": "http.response.start", "status": status, "headers": hdrs})
             await send({"type": "http.response.body", "body": data})
 
-        early = None
-        if not self.path_ok(scope.get("path", "/")):
+        early = self.well_known(http_method, scope.get("path", "/"), headers)
+        if early is not None:
+            pass
+        elif not self.path_ok(scope.get("path", "/")):
             early = _err(404, None, INVALID_REQUEST, "no MCP endpoint at this path")
         else:
             early = self.reject_duplicates({n for n in names if names.count(n) > 1})
@@ -61,7 +65,7 @@ class ASGIServer(_Core):
         if early is None and declared > self.max_body:
             early = self.too_large()               # refuse before reading a byte
         if early is not None:
-            return await reply(*early)
+            return await reply(*early, getattr(early, "headers", ()))
 
         chunks, size, more = [], 0, True
         while more:
@@ -79,8 +83,9 @@ class ASGIServer(_Core):
         early, req = await self.prepare(http_method, headers, raw)
         if early is None and self.wants_stream(req, headers):
             return await self._stream(req, headers, receive, send)
-        status, payload = early if early is not None else await self.respond(req)
-        await reply(status, payload)
+        out = early if early is not None else await self.respond(req, headers=headers)
+        status, payload = out
+        await reply(status, payload, getattr(out, "headers", ()))
 
     async def _stream(self, req, headers, receive, send):
         """Answer one validated request with a request-scoped SSE stream.

@@ -64,11 +64,15 @@ class Server(_Core):
         for k in ("CONTENT_TYPE", "CONTENT_LENGTH"):       # not HTTP_-prefixed in WSGI
             if environ.get(k):
                 headers[k.replace("_", "-").lower()] = environ[k]
+        headers[":scheme"] = environ.get("wsgi.url_scheme") or "http"
         http_method = environ.get("REQUEST_METHOD", "POST")
         full_path = (environ.get("SCRIPT_NAME", "") or "") + (environ.get("PATH_INFO", "") or "")
 
-        if not self.path_ok(full_path):
-            status, payload = _err(404, None, INVALID_REQUEST, "no MCP endpoint at this path")
+        reply = self.well_known(http_method, full_path, headers)
+        if reply is not None:
+            pass
+        elif not self.path_ok(full_path):
+            reply = _err(404, None, INVALID_REQUEST, "no MCP endpoint at this path")
         else:
             try:
                 n = int(environ.get("CONTENT_LENGTH") or 0)
@@ -76,10 +80,10 @@ class Server(_Core):
                 n = 0
             chunked = "chunked" in environ.get("HTTP_TRANSFER_ENCODING", "").lower()
             if n > self.max_body:
-                status, payload = self.too_large()
+                reply = self.too_large()
             elif http_method == "POST" and n <= 0 and chunked \
                     and not environ.get("wsgi.input_terminated"):
-                status, payload = _err(411, None, INVALID_REQUEST, "Content-Length required")
+                reply = _err(411, None, INVALID_REQUEST, "Content-Length required")
             else:
                 if n > 0:
                     raw = environ["wsgi.input"].read(n)
@@ -88,19 +92,21 @@ class Server(_Core):
                 else:
                     raw = b""
                 if len(raw) > self.max_body:
-                    status, payload = self.too_large()
+                    reply = self.too_large()
                 else:
                     try:
-                        status, payload = self._runner.run(
+                        reply = self._runner.run(
                             self.handle(http_method, headers, raw), self.timeout)
                     except concurrent.futures.TimeoutError:
                         log.error("request exceeded timeout=%ss", self.timeout)
-                        status, payload = _err(500, None, INTERNAL_ERROR, "Internal error")
+                        reply = _err(500, None, INTERNAL_ERROR, "Internal error")
 
+        status, payload = reply
         status, data = _encode(status, payload)
         hdrs = [("Content-Length", str(len(data)))]
         if data:
             hdrs.insert(0, ("Content-Type", "application/json"))
         hdrs += self.extra_headers(http_method, headers, status)
+        hdrs += list(getattr(reply, "headers", ()))
         start_response(_STATUS.get(status, f"{status} Error"), hdrs)
         return [data]

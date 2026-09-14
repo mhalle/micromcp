@@ -20,6 +20,21 @@ First packaged release. Same public API as the original single file:
   with an empty honored set, then a completion result carrying the
   subscription id) instead of answering 404 / `-32601`, which Go SDK 1.7
   clients treated as a failed connection.
+- `legacy="stateless"` (off by default) serves 2025-era clients per request
+  and without sessions, the posture the official SDKs call stateless legacy
+  serving: `initialize` answered from the registry, initialized `202`,
+  `ping`, unstamped results, GET/DELETE `405`. `server/discover` and the
+  `-32022` refusal then list both eras. Verified against the TypeScript SDK
+  2.0.0 client's default mode and the Python client's `mode="legacy"`.
+- `ctx.client_info` exposes the envelope's client identity.
+
+### Auth
+- `Unauthorized` (raise from `authenticate` or a handler) answers `401` with
+  a sanitized `WWW-Authenticate: Bearer` challenge; `Unauthorized.invalid()`
+  is the `error="invalid_token"` form. `resource_metadata=` serves the RFC
+  9728 document at `/.well-known/oauth-protected-resource[<path>]` and fills
+  the challenge's URL in from the request's scheme and Host. The challenge
+  header is CORS-exposed. Error replies can now carry response headers.
 
 ### UI apps
 - `meta=` on tools, resources, templates, and prompts is validated at

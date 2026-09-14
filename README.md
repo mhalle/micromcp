@@ -271,6 +271,32 @@ guarded resource or prompt the caller may not use is indistinguishable from one
 that does not exist (`404` / `-32601`), and listings show only what the caller
 may use. A guard that raises denies.
 
+**OAuth handoff.** Being an authorization server is out of scope, but the
+handoff to one is not. Raise `Unauthorized` from `authenticate` (or from a
+handler) and the answer is `401` with a `WWW-Authenticate: Bearer` challenge,
+which is what makes an OAuth-capable client (Claude.ai, the Inspector, the
+SDKs) start its flow. Pass `resource_metadata=` to serve the RFC 9728
+document at `/.well-known/oauth-protected-resource` (and at the
+path-suffixed form when `path=` is set); the challenge then names that URL
+by default, built from the request's scheme and `Host` (a proxy's
+`X-Forwarded-Proto` wins).
+
+```python
+from micromcp import Unauthorized
+
+def authenticate(headers):
+    token = headers.get("authorization", "").removeprefix("Bearer ")
+    if not token:
+        raise Unauthorized(scope="read")                 # start the OAuth flow
+    return store.lookup(token) or Unauthorized.invalid()  # error="invalid_token"
+
+app = ASGIServer(mcp, authenticate=authenticate, path="/mcp",
+                 resource_metadata={"resource": "https://mcp.example.com/mcp",
+                                    "authorization_servers": ["https://auth.example.com"],
+                                    "scopes_supported": ["read"],
+                                    "bearer_methods_supported": ["header"]})
+```
+
 ## Mounting
 
 ```python
@@ -299,9 +325,11 @@ Implemented: `server/discover`, `tools/list`, `tools/call`, `resources/list`,
 `resources/read`, `resources/templates/list`, `prompts/list`, `prompts/get`,
 plus progress and logging notifications.
 
-Deliberately not implemented: the initialize-handshake era (`2024-11-05` through
-`2025-11-25`), sessions, resumable streams, `subscriptions/listen`,
-`completion/complete`, MRTR/elicitation, pagination cursors, and OAuth.
+Deliberately not implemented: sessions, resumable streams, change
+notifications (`subscriptions/listen` is accepted and closed gracefully),
+`completion/complete`, MRTR/elicitation, pagination cursors, and being an
+OAuth authorization server. The initialize-handshake era is refused by
+default and served per request, without sessions, with `legacy="stateless"`.
 
 Requests without an `id` (JSON-RPC notifications) pass the Origin, Host, and
 Content-Type checks, are acknowledged with `202`, and are never dispatched. Bodies that are not a single JSON-RPC object, including
@@ -312,7 +340,8 @@ one. Server identity travels in `result._meta` on every result, as the 2026
 revision expects. Handler exceptions outside `tools/call` are logged
 server-side and answered with a constant `-32603` message.
 
-**Client compatibility.** This server speaks only `2026-07-28`. Verified
+**Client compatibility.** This server speaks `2026-07-28`, and refuses
+everything else unless told otherwise. Verified
 against the Python `mcp` SDK 2.x, FastMCP 4.x, and Claude Code 2.1.258, whose
 first request is a `server/discover` probe at `2026-07-28`; it then lists
 prompts, resources, and tools, calls tools (a `Context` tool is answered with
@@ -338,18 +367,36 @@ default is to probe `server/discover` first. TypeScript SDK 2.x and Rust
 `mcp_2026_07_28` feature flag; Mastra needs `protocolVersion: 'auto'`).
 Hosts still on TypeScript SDK 1.x (VS Code, Cursor as far as is known,
 Gemini CLI, Cline, LibreChat, Open WebUI), Zed, ChatGPT connectors, and the
-Java, Kotlin, and Swift SDKs cannot. Serving both eras is a deliberate
-non-goal here; put a translating gateway in front if legacy clients matter.
+Java, Kotlin, and Swift SDKs cannot, unless the server opts in below.
+
+**Legacy clients, opt-in.** `Server(mcp, legacy="stateless")` (and the same
+on `ASGIServer`) serves 2025-era clients the way the official SDKs' stateless
+legacy mode does: per request, with no sessions. A request without the
+per-request envelope is answered on the 2025 ladder: `initialize` returns the
+capabilities and server identity from the registry every time (echoing a
+requested `2025-11-25`, `2025-06-18`, or `2025-03-26`; anything else gets
+`2025-11-25`), the initialized notification is `202`, `ping` is `{}`, results
+carry no `resultType`/`ttlMs`/`cacheScope`, and GET and DELETE stay `405`.
+Routing headers and the envelope are not required of such requests; a
+`Context` tool still streams SSE with its progress notifications. A request
+that names `2026-07-28` in its header or envelope always takes the modern
+ladder, and `server/discover` then advertises both eras. Verified with the
+Python `mcp` 2.x client in both `mode="legacy"` and `mode="auto"` (which
+still picks the modern era), the TypeScript SDK 2.0.0 client in its default
+legacy mode, and the Go SDK 1.7.0 client. The default stays refuse: turning
+the fallback on is a one-word decision, and the README should not make it
+for you.
 
 OAuth is the boundary where rolling your own stops being sensible. Bearer tokens
-against your own store are fine; being an OAuth 2.1 authorization server (RFC
-9728 / 8414 / 7591, PKCE) is not 600 lines and is not code to hand-roll.
+against your own store, the `401` challenge, and the RFC 9728 document are
+here; being an OAuth 2.1 authorization server (RFC 8414 / 7591, PKCE) is not
+600 lines and is not code to hand-roll.
 
 ## Tests
 
 ```
 pip install -e . --group test            # or: uv pip install -e . --group test
-pytest                                   # all nine suites, in their own processes
+pytest                                   # all ten suites, in their own processes
 pytest -m "unit or conform"              # no servers, no optional clients
 pytest -m "server or interop"            # uvicorn/waitress/gunicorn + the mcp client
 ```
@@ -365,6 +412,7 @@ conform.py          11 checks against the strict mcp-types wire schema
 interop.py          end-to-end with the official mcp client, 9 assertions
 test_asgi.py        native ASGI under uvicorn and mounted in Starlette
 test_progress.py    40 SSE checks: ordering, cancellation, subscriptions/listen, WSGI degradation
+test_legacy.py      71 checks: legacy="stateless" serving, OAuth handoff, both transports
 harnesses.py        wsgiref, Flask, Starlette, waitress, gunicorn
 ergonomics.py       API tour, 12 assertions
 test_hardening.py   247 regression checks from four adversarial reviews + UI apps
