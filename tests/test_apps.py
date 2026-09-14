@@ -343,5 +343,109 @@ if django:
     check("django_routes returns its tool name, for Widget(route=)",
           django_routes(MCP("named"), prefixes=["/app/"]), "django_http")
 
+# ── channels ───────────────────────────────────────────────────────────────
+print("channels")
+import threading  # noqa: E402
+import time  # noqa: E402
+
+cm = MCP("channel-test")
+events = []
+room = cm.channel("room")
+
+
+@room.on_connect
+def room_joined(conn):
+    events.append(("connect", conn.params, conn.principal))
+    conn.send_json({"hello": conn.params.get("who", "?")})
+
+
+@room.on_message
+async def room_message(conn, text):
+    events.append(("message", text))
+    conn.send("echo:" + text)
+
+
+@room.on_disconnect
+def room_left(conn):
+    events.append(("disconnect", conn.id))
+
+
+cm.channel("private", guards=[lambda p: p is not None])
+small = cm.channel("small", max_queue=3)
+brief = cm.channel("brief", idle=0.2)
+crpc = client(cm, authenticate=lambda h: {"sub": "u1"}
+              if h.get("authorization") == "Bearer t" else None)
+
+
+def ctool(name, args, auth=None):
+    r = crpc("tools/call", {"name": name, "arguments": args}, auth=auth)[1]
+    return (r.get("result") or {}).get("structuredContent") or r
+
+
+listed = {t["name"]: t for t in crpc("tools/list")[1]["result"]["tools"]}
+check("four channel tools, registered once, all app-only",
+      sorted((n, listed[n]["_meta"]["ui"]["visibility"][0]) for n in listed if n.startswith("channel_")),
+      [("channel_close", "app"), ("channel_open", "app"), ("channel_recv", "app"),
+       ("channel_send", "app")])
+check("a channel name is registered once", raises(lambda: cm.channel("room")), "ValueError")
+check("a channel name must be a tool-style name", raises(lambda: cm.channel("no spaces")),
+      "ValueError")
+o = ctool("channel_open", {"channel": "room", "params": "who=ann&partial=1"})
+check("open runs on_connect and returns its frames",
+      (bool(o["conn"]), o["frames"], o["closed"]), (True, ['{"hello":"ann"}'], False))
+check("on_connect sees the URL query and the principal", events[0], ("connect", {"who": "ann", "partial": "1"}, None))
+ctool("channel_send", {"conn": o["conn"], "data": "hi"})
+r = ctool("channel_recv", {"conn": o["conn"], "wait": 0})
+check("a sent frame reaches on_message, and its reply comes back through recv",
+      (events[-1], r["frames"]), (("message", "hi"), ["echo:hi"]))
+t0 = time.monotonic()
+threading.Timer(0.3, lambda: room.broadcast_json({"n": 1})).start()
+r = ctool("channel_recv", {"conn": o["conn"], "wait": 5})
+check("a waiting recv returns as soon as something is broadcast",
+      (r["frames"], time.monotonic() - t0 < 2), (['{"n":1}'], True))
+t0 = time.monotonic()
+r = ctool("channel_recv", {"conn": o["conn"], "wait": 0.5})
+check("an idle recv waits out its wait and returns empty",
+      (r["frames"], r["closed"], 0.4 < time.monotonic() - t0 < 2), ([], False, True))
+a = ctool("channel_open", {"channel": "room"}, auth="Bearer t")
+check("another principal cannot use a connection",
+      ctool("channel_recv", {"conn": a["conn"], "wait": 0})["closed"], True)
+check("its own principal can", ctool("channel_recv", {"conn": a["conn"], "wait": 0}, auth="Bearer t")
+      ["closed"], False)
+room.broadcast("to all")
+check("broadcast reaches every open connection",
+      (ctool("channel_recv", {"conn": o["conn"]})["frames"],
+       ctool("channel_recv", {"conn": a["conn"]}, auth="Bearer t")["frames"]),
+      (["to all"], ["to all"]))
+check("guards refuse an open", ctool("channel_open", {"channel": "private"})["conn"], None)
+check("guards admit a permitted principal",
+      bool(ctool("channel_open", {"channel": "private"}, auth="Bearer t")["conn"]), True)
+check("an unknown channel refuses", ctool("channel_open", {"channel": "nowhere"})["conn"], None)
+ctool("channel_close", {"conn": o["conn"]})
+check("close runs on_disconnect", events[-1], ("disconnect", o["conn"]))
+check("a closed connection reports closed",
+      ctool("channel_recv", {"conn": o["conn"], "wait": 0})["closed"], True)
+b = ctool("channel_open", {"channel": "room"})
+[server_side] = [c for c in room.connections if c.id == b["conn"]]
+server_side.send("last words")
+server_side.close()
+r = ctool("channel_recv", {"conn": b["conn"], "wait": 0})
+check("a server-side close delivers what was queued, then closes",
+      (r["frames"], r["closed"], events[-1]), (["last words"], True, ("disconnect", b["conn"])))
+x = ctool("channel_open", {"channel": "small"})
+for i in range(4):
+    small.broadcast(str(i))
+r = ctool("channel_recv", {"conn": x["conn"], "wait": 0})
+check("a connection that falls max_queue behind is closed",
+      (r["frames"], r["closed"]), (["0", "1", "2"], True))
+y = ctool("channel_open", {"channel": "brief"})
+time.sleep(0.35)
+ctool("channel_open", {"channel": "brief"})             # any channel request sweeps
+check("an idle connection is dropped", ctool("channel_recv", {"conn": y["conn"]})["closed"], True)
+check("Connection.send takes text", raises(lambda: a and room.connections[0].send({"x": 1}), TypeError),
+      "TypeError")
+check("a channel's wait caps the long poll",
+      raises(lambda: cm.channel("bad", wait=-1)), "ValueError")
+
 print(f"\n{OK} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

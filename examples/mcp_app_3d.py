@@ -2,8 +2,8 @@
 
 The model builds the scene with tools (`scene_add`, `scene_remove`, `scene_clear`); the widget
 renders it with three.js, loaded from jsdelivr through an import map that `Widget` declares
-for the host. The open widget polls the app-only `scene_state` tool, so objects the model adds
-appear live. Click an object (or its name in the list) to select it: the widget tells the model
+for the host. Every change is pushed to open widgets over a channel (`mcp.channel("scene")`),
+so objects the model adds appear at once. Click an object (or its name in the list) to select it: the widget tells the model
 what is selected through model context, "Delete selected" calls the same `scene_remove` tool the
 model uses, and "Ask Claude" posts a question about the selection into the chat.
 
@@ -182,9 +182,8 @@ renderer.domElement.addEventListener("pointerup", e => {   // a click, not the e
 
 $("del").addEventListener("click", async () => {
   if (selected === null) return;
-  await mcp.callTool("scene_remove", {id: selected});
+  await mcp.callTool("scene_remove", {id: selected});         // the change arrives on the channel
   select(null);
-  poll();
 });
 $("ask").addEventListener("click", () => {
   const o = objects.find(o => o.id === selected);
@@ -202,28 +201,33 @@ new ResizeObserver(resize).observe(view);
 resize();
 renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
 
-async function poll() {
-  try {
-    const snap = (await mcp.callTool("scene_state", {})).structuredContent;
-    if (snap && snap.version !== version) { version = snap.version; build(snap); }
-    mcp.status(`${objects.length} objects, scene version ${version} - synced ${new Date().toLocaleTimeString()}`);
-  } catch (e) { mcp.status("sync failed: " + e.message); }
-}
-mcp.ready.then(() => {
-  poll();
-  setInterval(() => { if (document.visibilityState === "visible") poll(); }, 2000);
-});
+// The server pushes a snapshot on connect and after every change.
+const feed = mcp.channel("scene");
+feed.onmessage = e => {
+  const snap = JSON.parse(e.data);
+  if (snap.version !== version) { version = snap.version; build(snap); }
+  mcp.status(`${objects.length} objects, scene version ${version} - pushed ${new Date().toLocaleTimeString()}`);
+};
+feed.onclose = e => mcp.status(`disconnected (${e.code}${e.reason ? ": " + e.reason : ""})`);
 """  # noqa: E501
 
 
 def scene_mcp():
-    from micromcp import MCP, Widget, result
+    from micromcp import MCP, Widget
 
     mcp, scene = MCP("hm-3d", "0.1.0"), Scene()
     viewer = Widget("scene3d", title="3D scene", border=True, styles=CSS, body=BODY,
                     imports={"three": THREE + "build/three.module.js",
                              "three/addons/": THREE + "examples/jsm/"},
                     modules=[VIEWER_JS])
+    feed = mcp.channel("scene")               # open widgets get every change pushed to them
+
+    @feed.on_connect
+    def joined(conn):
+        conn.send_json(scene.snapshot())
+
+    def changed():
+        feed.broadcast_json(scene.snapshot())
 
     @mcp.tool(widget=viewer, title="Show the 3D scene", read_only=True)
     def show_scene() -> str:
@@ -246,24 +250,22 @@ def scene_mcp():
             label: A short name shown in the widget.
         """
         obj = scene.add(shape, color, x, y, z, size, label)
+        changed()
         return f"Added object #{obj['id']}. {scene.summary()}"
 
     @mcp.tool(visibility=["model", "app"], title="Remove a 3D object")
     def scene_remove(id: int) -> str:
         """Remove an object from the shared 3D scene by its id (the widget's Delete button too)."""
-        return ("Removed." if scene.remove(id) else f"No object #{id}.") + " " + scene.summary()
+        removed = scene.remove(id)
+        changed()
+        return ("Removed." if removed else f"No object #{id}.") + " " + scene.summary()
 
     @mcp.tool(destructive=True, title="Clear the 3D scene")
     def scene_clear() -> str:
         """Remove every object from the shared 3D scene."""
         scene.clear()
+        changed()
         return "The scene is empty."
-
-    @mcp.tool(visibility="app", read_only=True)
-    def scene_state():
-        """The scene as data, for the widget to render (widget only)."""
-        snap = scene.snapshot()
-        return result([{"type": "text", "text": f"scene version {snap['version']}"}], structured=snap)
 
     return mcp
 

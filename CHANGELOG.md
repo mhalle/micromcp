@@ -36,6 +36,14 @@
 - Model context: `fragment(context=)` and `mcp.setContext()` send
   `ui/update-model-context` (text plus data as a labeled JSON block);
   `mcp.say()` and `data-mcp-say` send `ui/message`.
+- Channels: `mcp.channel(name, guards=, wait=, idle=, max_queue=)` is a
+  WebSocket-style channel between widgets and server code (`on_connect`,
+  `on_message`, `on_disconnect`; `Connection.send`/`send_json`/`close`;
+  `broadcast`/`broadcast_json`, thread-safe). In the widget,
+  `mcp.channel(name)` and `mcp.WebSocket` follow the WebSocket API. Four
+  shared app-only tools carry it, `channel_recv` being a long poll (20 s by
+  default, verified in Claude); connections are bound to their principal,
+  dropped when idle, and closed when too far behind.
 - Django: `django_routes(mcp, prefixes=)` serves Django views to widgets
   in process (prefix-confined, redirects followed, hypermedia headers
   forwarded, JSON bodies); `set_mcp_context(response, text, data)`.
