@@ -375,6 +375,83 @@ def lab_mcp():
     return mcp
 
 
+# --- CDN lab: do hosts load https scripts whose origin the widget declares? ------------------
+#
+# Two widgets load htmx from jsdelivr. `cdn-declared` is a Widget, which declares the origin in
+# _meta.ui.csp.resourceDomains; `cdn-undeclared` is the same page with no declaration (the
+# control: if it also loads, the host is not enforcing declarations). Each reports whether htmx
+# loaded and any policy violations to cdn_report, which logs a LABCDN line.
+
+HTMX_CDN = "https://cdn.jsdelivr.net/npm/htmx.org@4.0.0/dist/htmx.min.js"
+
+CDN_REPORT_JS = r"""
+mcp.ready.then(async () => {
+  await new Promise(r => setTimeout(r, 2000));
+  const v = window.__cdnViolations;
+  const report = {htmx: typeof htmx !== "undefined", items: document.querySelectorAll("li[data-id]").length,
+                  violations: v.slice(0, 3), host: mcp.hostInfo};
+  document.querySelector("[data-mcp-status]").textContent = "htmx loaded: " + report.htmx +
+    " | items: " + report.items + " | violations: " + (v.join(" | ") || "none");
+  mcp.callTool("cdn_report", {variant: window.CDN_VARIANT, report: JSON.stringify(report)}).catch(() => {});
+});
+"""  # noqa: E501
+
+
+def _cdn_scripts(variant):
+    watch = (f"window.CDN_VARIANT = {json.dumps(variant)}; window.__cdnViolations = []; "
+             "document.addEventListener('securitypolicyviolation', e => "
+             "window.__cdnViolations.push(e.violatedDirective + ' ' + e.blockedURI));")
+    return [watch, HTMX_CDN, CDN_REPORT_JS]      # the listener is in place before the CDN tag
+
+
+def cdn_mcp():
+    from micromcp import MCP, Widget, fragment, page
+
+    mcp = MCP("hm-cdn", "0.1.0")
+
+    def body(title):
+        return (f"<h1>{html.escape(title)}</h1>"
+                '<div id="app" hx-post="tool:lab_list?kit=htmx" hx-trigger="mcp:ready" '
+                'hx-target="#app" hx-swap="innerMorph"><em>waiting for htmx&hellip;</em></div>'
+                "<small data-mcp-status>checking&hellip;</small>")
+
+    declared = Widget("cdn-declared", title="CDN test: origin declared", border=True,
+                      scripts=_cdn_scripts("declared"), body=body("htmx from a CDN (declared)"))
+    undeclared = Widget("cdn-undeclared", title="CDN test: origin not declared", border=True,
+                        html=page(body("htmx from a CDN (NOT declared)"),
+                                  title="CDN test: origin not declared",
+                                  scripts=_cdn_scripts("undeclared")))
+
+    @mcp.tool(widget=declared, read_only=True, title="CDN test: origin declared")
+    def cdn_declared() -> str:
+        """Open a widget that loads htmx from a CDN, with the origin declared in its csp."""
+        return "Opened the declared-origin CDN widget; it reports whether htmx loaded."
+
+    @mcp.tool(widget=undeclared, read_only=True, title="CDN test: origin not declared")
+    def cdn_undeclared() -> str:
+        """Open the control widget: the same CDN script with no origin declared."""
+        return "Opened the undeclared-origin CDN widget; it reports whether htmx loaded."
+
+    @mcp.tool(visibility="app", read_only=True)
+    def lab_list(kit: str, text: str = ""):
+        """Render the htmx lab list (widget only)."""
+        return fragment(_render("htmx"))
+
+    @mcp.tool(visibility="app")
+    def lab_toggle(kit: str, id: str = "", text: str = ""):
+        """Toggle an htmx lab item (widget only)."""
+        STORE.toggle("htmx", id)
+        return fragment(_render("htmx"))
+
+    @mcp.tool(visibility="app")
+    def cdn_report(variant: str, report: str) -> str:
+        """Log what a CDN widget saw (widget only)."""
+        print(f"LABCDN {variant[:20]} {report[:400]}", flush=True)
+        return "ok"
+
+    return mcp
+
+
 # --- context lab: what reaches the model through ui/update-model-context and ui/message ----
 #
 # The count is reported ONLY through model context: no model-visible tool returns it. Every push
