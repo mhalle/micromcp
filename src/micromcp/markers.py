@@ -27,10 +27,22 @@ class Context:
     poll `ctx.cancelled` from long loops to stop cooperatively.
     """
 
-    def __init__(self, emit=None, progress_token=None, stop=None):
+    def __init__(self, emit=None, progress_token=None, stop=None, meta=None):
         self._emit = emit
         self._token = progress_token
         self._stop = stop
+        self._meta = dict(meta or {})
+
+    @property
+    def request_meta(self) -> dict:
+        """The request's `_meta` as sent by the client (a copy)."""
+        return dict(self._meta)
+
+    @property
+    def client_capabilities(self) -> dict:
+        """`_meta["io.modelcontextprotocol/clientCapabilities"]`, e.g. to check for
+        `extensions["io.modelcontextprotocol/ui"]` and degrade to a text-only result."""
+        return dict(self._meta.get("io.modelcontextprotocol/clientCapabilities") or {})
 
     @property
     def streaming(self) -> bool:

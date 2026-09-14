@@ -16,10 +16,19 @@ First packaged release. Same public API as the original single file:
   constructor options; the module constants are only their defaults.
 
 ### UI apps
-- `meta=` on tools, resources, templates, and prompts is published as
-  `_meta`; handlers may return finished results (content blocks, `isError`,
-  `_meta`); `embedded_resource()` builds the block MCP-UI / MCP Apps hosts
-  render.
+- `meta=` on tools, resources, templates, and prompts is validated at
+  registration (JSON, valid `_meta` keys, no reserved prefixes) and published
+  as `_meta`, detached from the caller's dict.
+- `result(content, structured=, is_error=, meta=)` is the explicit way to
+  return a finished tool result; blocks are checked against the five content
+  types and reserved `_meta` keys are refused. Plain dicts are always data.
+- `embedded_resource()` validates text/blob and defaults to
+  `text/html;profile=mcp-app`; `ui://` resources default to that profile and
+  registration warns when they carry guards or template parameters.
+- `ctx.request_meta` / `ctx.client_capabilities` expose the request's `_meta`.
+- Verified rendering as an MCP App in the Claude desktop chat;
+  `examples/mcp_app_modal.py` is a spec-2026-01-26 widget with a sender check,
+  DOM-only rendering, error handling, theme, and ResizeObserver sizing.
 
 ### Hardening (three rounds of adversarial review, 2026-09-13)
 - Principal/Context detection is structural and fail-closed: works through

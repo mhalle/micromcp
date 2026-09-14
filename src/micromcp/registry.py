@@ -3,12 +3,39 @@
 from __future__ import annotations
 
 import inspect
+import json
 import re
 
 from ._constants import _NAME_RE, INVALID_PARAMS, log
+
 from .docstrings import _parse_doc
 from .errors import Error
 from .schema import _fname, _hints, _input_schema, _output_schema
+
+_LABEL = r"[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?"
+_META_KEY_RE = re.compile(rf"^(?:({_LABEL}(?:\.{_LABEL})*)/)?"
+                          r"[a-zA-Z0-9](?:[a-zA-Z0-9._-]*[a-zA-Z0-9])?$")
+_APP_MIME = "text/html;profile=mcp-app"
+
+
+def _meta_ok(meta, what: str) -> dict:
+    """Validate a `_meta` object the way the 2026 MetaObject schema does and
+    return a detached JSON-clean copy. Reserved prefixes (`io.modelcontextprotocol/`,
+    any `*.mcp/`) are refused: they belong to the protocol, not to handlers."""
+    if not isinstance(meta, dict):
+        raise ValueError(f"{what} meta must be a dict")
+    for k in meta:
+        m = _META_KEY_RE.match(k) if isinstance(k, str) else None
+        if not m:
+            raise ValueError(f"{what} meta key {k!r} is not a valid _meta key")
+        labels = (m.group(1) or "").split(".")
+        if len(labels) >= 2 and labels[1] in ("modelcontextprotocol", "mcp"):
+            raise ValueError(f"{what} meta key {k!r} uses a reserved prefix")
+    try:
+        return json.loads(json.dumps(meta, allow_nan=False))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{what} meta is not JSON-serializable: {exc}") from None
+
 
 _TEMPLATE_RE = re.compile(r"\{([^{}]*)\}")
 
@@ -147,7 +174,7 @@ class MCP:
             if ann:
                 entry["annotations"] = ann
             if meta:
-                entry["_meta_out"] = dict(meta)
+                entry["_meta_out"] = _meta_ok(meta, f"tool {n!r}")
             out = _output_schema(f, output_schema)
             if out:
                 entry["outputSchema"] = out
@@ -155,7 +182,7 @@ class MCP:
             return f
         return wrap(fn) if fn else wrap
 
-    def resource(self, uri: str, *, mime_type="text/plain", title=None, guards=(),
+    def resource(self, uri: str, *, mime_type=None, title=None, guards=(),
                  replace=False, meta=None):
         """Register a resource. A `{braced}` segment makes it a template:
 
@@ -168,20 +195,32 @@ class MCP:
         A handler returning `bytes` is delivered as a base64 `blob`. Guards are
         evaluated on read and on listing, before any parameter is parsed; a
         denied resource is indistinguishable from a missing one. `meta` is
-        published as `_meta` in listings and on the read contents — a `ui://`
-        resource serving `text/html;profile=mcp-app` is registered like any
-        other.
+        published as `_meta` in listings and on the read contents.
+
+        `mime_type` defaults to `text/plain`, or to `text/html;profile=mcp-app`
+        for a `ui://` URI (an MCP App widget). Widgets are fetched by the host
+        under its own identity and cached, so they should be static: no
+        guards, no template parameters, no per-user content — put that in the
+        guarded tool's result instead. Both are warned about at registration.
         """
         def wrap(f):
             rx, params = _compile_template(uri)
             _schema_unused, inject = _input_schema(f)
-            entry = {"name": _fname(f), "mimeType": mime_type,
+            mime = mime_type or (_APP_MIME if uri.startswith("ui://") else "text/plain")
+            if uri.startswith("ui://"):
+                if guards:
+                    log.warning("ui resource %r has guards: hosts prefetch widgets with their "
+                                "own identity, so it will not render; keep widgets static", uri)
+                if rx is not None:
+                    log.warning("ui resource %r is a template: URI parameters must never be "
+                                "rendered into widget HTML (XSS); keep widgets static", uri)
+            entry = {"name": _fname(f), "mimeType": mime,
                      "_fn": f, "_guards": guards, "_hints": inject["hints"],
                      "_principal": inject["principal"], "_context": inject["context"]}
             if title:
                 entry["title"] = title
             if meta:
-                entry["_meta_out"] = dict(meta)
+                entry["_meta_out"] = _meta_ok(meta, f"resource {uri!r}")
             registry = self.templates if rx is not None else self.resources
             if uri in registry and not replace:
                 raise ValueError(f"resource {uri!r} is already registered (pass replace=True)")
@@ -218,7 +257,7 @@ class MCP:
             if title:
                 entry["title"] = title
             if meta:
-                entry["_meta_out"] = dict(meta)
+                entry["_meta_out"] = _meta_ok(meta, f"prompt {n!r}")
             self.prompts[n] = entry
             return f
         return wrap(fn) if fn else wrap

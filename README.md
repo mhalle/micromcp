@@ -109,40 +109,54 @@ Prompt arguments arrive as strings and are coerced to the handler's `int`,
 `float`, or `bool` hints; `Principal` and `Context` parameters are injected
 exactly as for tools, and docstring `Args:` become argument descriptions.
 
-## UI apps (MCP-UI / MCP Apps)
+## UI apps (MCP Apps / MCP-UI)
 
 A host that renders UI needs three things from a server, and all three are
 plain registration options:
 
 ```python
-HTML = open("widget.html").read()
+from micromcp import MCP, ASGIServer, result, embedded_resource
 
-@mcp.resource("ui://crash-widget", mime_type="text/html;profile=mcp-app",
-              meta={"ui": {"csp": {"resourceDomains": []}}})
+HTML = open("widget.html").read()          # static: no guards, no templates, no user data
+
+@mcp.resource("ui://crash-widget",         # mime defaults to text/html;profile=mcp-app
+              meta={"ui": {"prefersBorder": True, "csp": {"resourceDomains": []}}})
 def crash_widget() -> str:
     return HTML
 
-@mcp.tool(meta={"ui": {"resourceUri": "ui://crash-widget"},       # published as _meta;
-                "ui/resourceUri": "ui://crash-widget"})           # hosts read either key
+@mcp.tool(meta={"ui": {"resourceUri": "ui://crash-widget"}})   # published as the tool's _meta
 def show_crashes(street: str) -> dict:
-    return {
-        "content": [{"type": "text", "text": f"Crashes on {street}"},
-                    embedded_resource("ui://crash-widget", text=HTML,
-                                      mime_type="text/html;profile=mcp-app")],
-        "structuredContent": {"street": street, "count": 11},
-        "_meta": {"ui": {"height": 400}},
-    }
+    by_year = lookup(street)
+    if by_year is None:
+        return result([{"type": "text", "text": f"no data for {street}"}], is_error=True)
+    return result([{"type": "text", "text": f"Crashes on {street}"}],
+                  structured={"street": street, "by_year": by_year})
 ```
 
-`meta=` on a tool, resource, template, or prompt is published as its `_meta`
-in listings (and on a resource's read contents). A handler that returns a
-dict whose `content` is a list of typed blocks is treated as a finished
-result and passed through verbatim — including `structuredContent`,
-`isError`, and its own `_meta`, which is merged with the server's identity
-stamp. `embedded_resource(...)` builds the block MCP-UI and MCP Apps hosts
-render; a `blob=` makes it base64. A declared `outputSchema` still requires
-`structuredContent`. Everything the iframe does afterwards arrives as
-ordinary `tools/call` requests through the host.
+`meta=` on a tool, resource, template, or prompt is validated at registration
+(a dict, JSON-serializable, valid `_meta` keys, no reserved
+`io.modelcontextprotocol/` prefix) and published as its `_meta`; a resource's
+meta also rides on its read contents. `result(content, structured=,
+is_error=, meta=)` is the explicit way to return a finished tool result; its
+blocks are checked against the five content-block types before they leave,
+and its `_meta` is merged under the server's identity stamp. A plain dict is
+always data and is wrapped as JSON text, so client-derived data can never be
+mistaken for a result. `embedded_resource(uri, text=|blob=)` builds the block
+that MCP-UI-style hosts render from the result itself; MCP Apps hosts instead
+load the widget from the `ui://` resource the tool's `_meta` names. A declared
+`outputSchema` still requires `structured`.
+
+Widgets must be static. Hosts fetch a `ui://` resource under their own
+identity, with none of the end user's credentials, and cache it per
+connector: a guarded widget is simply never rendered, and a templated one
+would interpolate URI text into HTML the host runs. Registration warns about
+both. Every piece of per-user data belongs in the guarded tool's result, which
+the host delivers to the widget as `ui/notifications/tool-result`. Inside a
+tool, `ctx.client_capabilities` exposes what the client declared, so a handler
+can check for `extensions["io.modelcontextprotocol/ui"]` and return a
+text-only result to hosts without UI. A tool's `_meta.ui.visibility` is
+passed through for the host to honor; `guards=` remains the only server-side
+enforcement.
 
 Verified 2026-09-14 in the Claude desktop chat via a custom connector
 (`examples/mcp_app_modal.py`, deployed on Modal): the host prefetches the
@@ -151,6 +165,8 @@ it. Two host behaviors worth knowing: the connector validator negotiates by
 sending `initialize`, taking the `-32022` refusal, and retrying with
 `server/discover`; and the host caches a connector's widget after its first
 fetch, so a changed widget needs a new connector identity to be picked up.
+The reference servers still emit the deprecated flat `ui/resourceUri` key
+alongside `ui.resourceUri`; the example does the same until hosts drop it.
 
 ## Injected parameters
 
@@ -327,7 +343,7 @@ test_asgi.py        native ASGI under uvicorn and mounted in Starlette
 test_progress.py    24 SSE checks: ordering, cancellation, WSGI degradation
 harnesses.py        wsgiref, Flask, Starlette, waitress, gunicorn
 ergonomics.py       API tour, 12 assertions
-test_hardening.py   228 regression checks from three adversarial reviews + UI apps
+test_hardening.py   247 regression checks from four adversarial reviews + UI apps
 test_defender.py    60 checks from the defensive audit (mutation-derived)
 ```
 

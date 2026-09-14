@@ -70,6 +70,13 @@ for method, params in CASES:
     status, resp = call(method, params)
     try:
         validate_server_result(method, PROTOCOL, resp["result"])
+        # The per-method union is vacuous for `resultType: complete`
+        # (InputRequiredResult only requires resultType); pin the concrete model.
+        from mcp_types import _v2026_07_28 as V
+        concrete = {"tools/call": V.CallToolResult, "resources/read": V.ReadResourceResult,
+                    "prompts/get": V.GetPromptResult}.get(method)
+        if concrete:
+            concrete.model_validate(resp["result"])
         print(f"  CONFORMS   {method}")
         ok += 1
     except KeyError:

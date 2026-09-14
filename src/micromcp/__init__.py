@@ -23,7 +23,9 @@ from ._constants import (
     STREAM_BUDGET, UNSUPPORTED_VERSION, WORKERS, log,
 )
 from .asgi import ASGIServer
-from .core import _Core, _Pool, _decode_hdr, _encode, embedded_resource  # noqa: F401
+from .core import (  # noqa: F401
+    MCP_APP_MIME, Result, _Core, _Pool, _decode_hdr, _encode, embedded_resource, result,
+)
 from .docstrings import _parse_doc  # noqa: F401
 from .errors import Error
 from .markers import Context, Principal
@@ -34,7 +36,8 @@ from .wsgi import Server, _Loop  # noqa: F401
 __version__ = "0.1.0"
 
 __all__ = [
-    "MCP", "Server", "ASGIServer", "Context", "Principal", "Error", "embedded_resource",
+    "MCP", "Server", "ASGIServer", "Context", "Principal", "Error",
+    "result", "Result", "embedded_resource", "MCP_APP_MIME",
     "PROTOCOL", "META_VER", "META_CAPS", "META_SERVER",
     "PARSE_ERROR", "INVALID_REQUEST", "METHOD_NOT_FOUND", "INVALID_PARAMS",
     "INTERNAL_ERROR", "HEADER_MISMATCH", "UNSUPPORTED_VERSION",

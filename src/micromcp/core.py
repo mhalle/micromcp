@@ -6,6 +6,7 @@ import asyncio
 import base64
 import concurrent.futures
 import contextvars
+import copy
 import dataclasses
 import datetime
 import enum
@@ -27,7 +28,7 @@ from ._constants import (
 )
 from .errors import Error, _err
 from .markers import Context
-from .registry import MCP, _allowed, _coerce, _is_async
+from .registry import MCP, _allowed, _coerce, _is_async, _meta_ok
 from .schema import _check, _from_json
 
 _SENTINEL_RE = re.compile(r"^=\?base64\?(.*)\?=$")
@@ -82,37 +83,95 @@ def _jsonable(o):
     raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
 
 
-def embedded_resource(uri: str, *, mime_type: str = "text/html", text: str | None = None,
-                      blob: bytes | None = None, meta: dict | None = None) -> dict:
-    """An embedded-resource content block, the shape MCP-UI and MCP Apps hosts
-    render: return it (inside a `content` list) from a tool handler.
+MCP_APP_MIME = "text/html;profile=mcp-app"
 
-        return {"content": [embedded_resource("ui://chart/1", text=html,
-                                               mime_type="text/html;profile=mcp-app")]}
+
+def embedded_resource(uri: str, *, mime_type: str = MCP_APP_MIME, text: str | None = None,
+                      blob: bytes | None = None, meta: dict | None = None) -> dict:
+    """An embedded-resource content block, the shape MCP-UI hosts render: pass
+    it to `result(content=[...])` from a tool handler. Exactly one of `text`
+    (a str) or `blob` (bytes, sent base64) is required.
     """
+    if (text is None) == (blob is None):
+        raise TypeError("embedded_resource: give exactly one of text= or blob=")
+    if text is not None and not isinstance(text, str):
+        raise TypeError("embedded_resource: text must be a str")
+    if blob is not None and not isinstance(blob, (bytes, bytearray)):
+        raise TypeError("embedded_resource: blob must be bytes")
     res: dict = {"uri": uri, "mimeType": mime_type}
     if blob is not None:
         res["blob"] = base64.b64encode(blob).decode()
     else:
-        res["text"] = text if text is not None else ""
+        res["text"] = text
     if meta:
-        res["_meta"] = dict(meta)
+        _meta_ok(meta, "embedded resource")
+        res["_meta"] = copy.deepcopy(meta)
     return {"type": "resource", "resource": res}
 
 
-def _is_result(value) -> bool:
-    """A handler may hand back a finished result — a dict whose `content` is a
-    list of typed blocks — to control content types, `isError`, or `_meta`
-    itself. Anything else is data and gets wrapped."""
-    return (isinstance(value, dict) and isinstance(value.get("content"), list)
-            and all(isinstance(b, dict) and isinstance(b.get("type"), str)
-                    for b in value["content"])
-            and set(value) <= {"content", "structuredContent", "isError", "_meta"})
+class Result(dict):
+    """A finished tool result a handler returns on purpose. Build it with
+    `result(...)`; plain dicts are always data and get wrapped as JSON text.
+    Only an explicit marker can control content types, `isError`, or `_meta`,
+    so client-derived data can never be mistaken for one."""
+
+
+def result(content=(), *, structured=None, is_error=False, meta=None) -> Result:
+    """Build a tool result: `content` is a list of typed blocks (`{"type":
+    "text", ...}`, `embedded_resource(...)`, ...); `structured` becomes
+    `structuredContent`; `meta` becomes the result's `_meta` (merged with the
+    server stamp; the reserved `io.modelcontextprotocol/` namespace is refused)."""
+    out = Result(content=list(content))
+    if structured is not None:
+        out["structuredContent"] = structured
+    if is_error:
+        out["isError"] = True
+    if meta:
+        out["_meta"] = dict(meta)
+    return out
+
+
+_BLOCK_FIELDS = {"text": ("text",), "image": ("data", "mimeType"), "audio": ("data", "mimeType"),
+                 "resource_link": ("uri", "name"), "resource": ("resource",)}
+
+
+def _check_result(r: dict) -> str | None:
+    """Validate an explicit Result against the CallToolResult shape hosts
+    accept. Returns a problem string or None."""
+    if not isinstance(r.get("content"), list):
+        return "content must be a list"
+    for i, b in enumerate(r["content"]):
+        if not isinstance(b, dict) or b.get("type") not in _BLOCK_FIELDS:
+            return f"content[{i}] must be a block of type {sorted(_BLOCK_FIELDS)}"
+        for f in _BLOCK_FIELDS[b["type"]]:
+            if f not in b:
+                return f"content[{i}] ({b['type']}) is missing {f!r}"
+        if b["type"] == "text" and not isinstance(b["text"], str):
+            return f"content[{i}] text must be a str"
+        if b["type"] == "resource":
+            res = b["resource"]
+            if not isinstance(res, dict) or not isinstance(res.get("uri"), str):
+                return f"content[{i}] resource needs a uri"
+            if (isinstance(res.get("text"), str)) == (isinstance(res.get("blob"), str)):
+                return f"content[{i}] resource needs exactly one of text/blob as a str"
+    if "isError" in r and not isinstance(r["isError"], bool):
+        return "isError must be a bool"
+    if "structuredContent" in r and not isinstance(r["structuredContent"], dict):
+        return "structuredContent must be an object"
+    if "_meta" in r:
+        try:
+            _meta_ok(r["_meta"], "result")
+        except ValueError as exc:
+            return str(exc)
+    return None
 
 
 def _as_content(value) -> dict:
-    if _is_result(value):
-        return dict(value)
+    if isinstance(value, Result):
+        problem = _check_result(value)
+        if problem:
+            raise ValueError(f"handler returned a malformed result: {problem}")
+        return copy.deepcopy(dict(value))
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         value = dataclasses.asdict(value)
     elif callable(getattr(value, "model_dump", None)):      # pydantic, no import
@@ -480,7 +539,7 @@ class _Core:
                     continue
                 item = {k: v for k, v in e.items() if not k.startswith("_")}
                 if e.get("_meta_out"):
-                    item["_meta"] = e["_meta_out"]
+                    item["_meta"] = copy.deepcopy(e["_meta_out"])
                 out.append(item)
             return out
 
@@ -488,8 +547,8 @@ class _Core:
             if entry["_principal"]:
                 kwargs[entry["_principal"]] = principal
             if entry["_context"]:
-                token = (params.get("_meta") or {}).get("progressToken")
-                kwargs[entry["_context"]] = Context(emit, token, stop)
+                meta = params.get("_meta") or {}
+                kwargs[entry["_context"]] = Context(emit, meta.get("progressToken"), stop, meta)
 
         if method == "server/discover":
             # Era negotiation. A modern client probes this FIRST; answering it
@@ -560,7 +619,7 @@ class _Core:
             else:
                 item["text"] = value if isinstance(value, str) else str(value)
             if entry.get("_meta_out"):
-                item["_meta"] = entry["_meta_out"]
+                item["_meta"] = copy.deepcopy(entry["_meta_out"])
             return {"contents": [item]}
 
         if method == "prompts/get":
