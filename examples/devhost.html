@@ -1,0 +1,123 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>micromcp dev host</title>
+<style>
+body{font:14px system-ui;margin:0;display:grid;grid-template-columns:minmax(320px,1fr) minmax(320px,1fr);height:100vh}
+section{padding:12px;overflow:auto}#left{border-right:1px solid #ccc}
+iframe{width:100%;border:1px solid #aaa;border-radius:6px;min-height:120px;background:#fff}
+pre{font:12px ui-monospace,monospace;white-space:pre-wrap;margin:0 0 6px;padding:4px;border-bottom:1px solid #eee}
+.in{color:#063}.out{color:#036}.err{color:#b00}h2{font-size:14px;margin:12px 0 4px}code{font-size:12px}
+</style></head>
+<body>
+<section id="left">
+  <div><b>MCP Apps dev host</b> — endpoint <code id="ep"></code>, model tool <code id="mt"></code></div>
+  <div id="tools"></div>
+  <h2>Widget</h2>
+  <iframe id="app" sandbox="allow-scripts"></iframe>
+  <h2>What the model would receive (ui/update-model-context, ui/message)</h2>
+  <div id="ctx"></div>
+</section>
+<section><h2>postMessage / MCP log</h2><div id="log"></div></section>
+<script>
+// A development stand-in for an MCP Apps host (extension spec 2026-01-26): reads the ui://
+// widget named by a tool's _meta, renders it in a sandboxed iframe under a deny-all CSP,
+// completes the handshake, delivers the model tool's result, and proxies the widget's
+// tools/call to the server for tools whose visibility includes "app". Not for production.
+const P = new URLSearchParams(location.search);
+const ENDPOINT = P.get("mcp") || "/mcp";
+const VER = "2026-07-28";
+const frame = document.getElementById("app");
+let rid = 0, tools = {}, main = null;
+const $log = document.getElementById("log");
+function log(cls, label, obj) {
+  const pre = document.createElement("pre"); pre.className = cls;
+  pre.textContent = label + " " + (typeof obj === "string" ? obj : JSON.stringify(obj));
+  $log.prepend(pre);
+}
+function addCtx(kind, text) {
+  const pre = document.createElement("pre"); pre.className = kind === "message" ? "err" : "in";
+  pre.textContent = new Date().toLocaleTimeString() + " " + kind + ": " + text;
+  document.getElementById("ctx").prepend(pre);
+}
+async function rpc(method, params = {}, name) {
+  const headers = {"content-type": "application/json", "accept": "application/json",
+                   "mcp-protocol-version": VER, "mcp-method": method};
+  if (name !== undefined) headers["mcp-name"] = name;
+  const meta = {"io.modelcontextprotocol/protocolVersion": VER,
+                "io.modelcontextprotocol/clientCapabilities": {extensions: {"io.modelcontextprotocol/ui": {mimeTypes: ["text/html;profile=mcp-app"]}}},
+                "io.modelcontextprotocol/clientInfo": {name: "micromcp-devhost", version: "0"}};
+  const body = {jsonrpc: "2.0", id: ++rid, method, params: {...params, _meta: meta}};
+  const r = await fetch(ENDPOINT, {method: "POST", headers, body: JSON.stringify(body)});
+  const j = await r.json();
+  log(j.error ? "err" : "in", `server ← ${method}`, j.error || j.result);
+  if (j.error) throw Object.assign(new Error(j.error.message), {rpc: j.error});
+  return j.result;
+}
+const ui = t => (t && t._meta && t._meta.ui) || {};
+const vis = t => ui(t).visibility || ["model", "app"];
+const uri = t => ui(t).resourceUri || (t && t._meta && t._meta["ui/resourceUri"]);
+const post = m => { log("out", "host → app", m); frame.contentWindow.postMessage(m, "*"); };
+// ?csp=strict (default, the MCP Apps spec's policy: no eval), eval (adds 'unsafe-eval'), none
+const CSP_MODE = P.get("csp") || "strict";
+const CSP = CSP_MODE === "none" ? "" : `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'${CSP_MODE === "eval" ? " 'unsafe-eval'" : ""}; style-src 'unsafe-inline'; img-src data:">`;
+
+window.addEventListener("message", async ev => {
+  if (ev.source !== frame.contentWindow) return;
+  const m = ev.data; if (!m || m.jsonrpc !== "2.0") return;
+  log("in", "app → host", m);
+  const reply = (result, error) => post(error ? {jsonrpc: "2.0", id: m.id, error} : {jsonrpc: "2.0", id: m.id, result});
+  switch (m.method) {
+    case "ui/initialize":
+      return reply({protocolVersion: "2026-01-26", hostInfo: {name: "micromcp-devhost", version: "0"},
+                    hostCapabilities: {serverTools: {}, serverResources: {}, logging: {}},
+                    hostContext: {theme: matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light",
+                                  displayMode: "inline", toolInfo: {tool: main}}});
+    case "ui/notifications/initialized": {
+      const args = JSON.parse(P.get("args") || "{}");
+      post({jsonrpc: "2.0", method: "ui/notifications/tool-input", params: {arguments: args}});
+      try {
+        const res = await rpc("tools/call", {name: main.name, arguments: args}, main.name);
+        post({jsonrpc: "2.0", method: "ui/notifications/tool-result", params: res});
+      } catch (e) { log("err", "model tool failed", String(e)); }
+      return;
+    }
+    case "tools/call": {
+      const t = tools[m.params && m.params.name];
+      if (!t || !vis(t).includes("app")) return reply(null, {code: -32602, message: "tool not callable by apps"});
+      try { return reply(await rpc("tools/call", m.params, t.name)); }
+      catch (e) { return reply(null, e.rpc || {code: -32603, message: String(e)}); }
+    }
+    case "resources/read":
+      try { return reply(await rpc("resources/read", m.params, m.params.uri)); }
+      catch (e) { return reply(null, e.rpc || {code: -32603, message: String(e)}); }
+    case "ui/update-model-context": {
+      const p = m.params || {};
+      addCtx("context", (p.content || []).map(b => b.text).join(" ") +
+                        (p.structuredContent ? "  | data " + JSON.stringify(p.structuredContent) : ""));
+      return reply({});
+    }
+    case "ui/message":
+      addCtx("message", JSON.stringify(m.params));
+      return reply({});
+    case "ui/notifications/size-changed":
+      frame.style.height = Math.min(Number(m.params.height) || 0, 2000) + "px"; return;
+    default:
+      if (m.id !== undefined && m.method) return m.method.startsWith("ui/") ? reply({}) : reply(null, {code: -32601, message: "method not found"});
+  }
+});
+
+(async () => {
+  document.getElementById("ep").textContent = ENDPOINT;
+  const list = (await rpc("tools/list")).tools;
+  for (const t of list) tools[t.name] = t;
+  main = P.get("tool") ? tools[P.get("tool")] : list.find(t => uri(t) && vis(t).includes("model"));
+  document.getElementById("mt").textContent = main ? main.name : "(none)";
+  document.getElementById("tools").textContent =
+    "model sees: " + list.filter(t => vis(t).includes("model")).map(t => t.name).join(", ") +
+    " · app-only: " + list.filter(t => !vis(t).includes("model")).map(t => t.name).join(", ");
+  if (!main) return;
+  const res = await rpc("resources/read", {uri: uri(main)}, uri(main));
+  const html = res.contents[0].text;
+  frame.srcdoc = html.replace(/<head>/i, "<head>" + CSP);
+})().catch(e => log("err", "dev host failed", String(e)));
+</script>
+</body></html>
