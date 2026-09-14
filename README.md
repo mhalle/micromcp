@@ -249,13 +249,14 @@ one. Server identity travels in `result._meta` on every result, as the 2026
 revision expects. Handler exceptions outside `tools/call` are logged
 server-side and answered with a constant `-32603` message.
 
-**Client compatibility.** This server speaks only `2026-07-28`. It works with
-the Python `mcp` SDK 2.x and FastMCP 4.x. The TypeScript SDK tops out at
-`2025-11-25` as of this writing, so TS-based clients — Claude Desktop, Cursor,
-Zed, MCP Inspector — cannot yet connect. They are refused with `-32022` and a
-`data.supported` / `data.requested` pair naming this revision, which is what a
-dual-era client parses as "modern peer, renegotiate", so they will work once
-their SDK ships 2026 support.
+**Client compatibility.** This server speaks only `2026-07-28`. Verified
+against the Python `mcp` SDK 2.x, FastMCP 4.x, and Claude Code 2.1.258, whose
+first request is a `server/discover` probe at `2026-07-28`; it then lists
+prompts, resources, and tools, calls tools (a `Context` tool is answered with
+an SSE stream carrying its progress and log notifications), and reads
+resources. A client that only speaks the initialize-handshake era is refused
+with `-32022` and a `data.supported` / `data.requested` pair, which is what a
+dual-era client parses as "modern peer, renegotiate".
 
 OAuth is the boundary where rolling your own stops being sensible. Bearer tokens
 against your own store are fine; being an OAuth 2.1 authorization server (RFC
