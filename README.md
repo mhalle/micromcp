@@ -122,7 +122,8 @@ HTML = open("widget.html").read()
 def crash_widget() -> str:
     return HTML
 
-@mcp.tool(meta={"ui": {"resourceUri": "ui://crash-widget"}})   # published as _meta
+@mcp.tool(meta={"ui": {"resourceUri": "ui://crash-widget"},       # published as _meta;
+                "ui/resourceUri": "ui://crash-widget"})           # hosts read either key
 def show_crashes(street: str) -> dict:
     return {
         "content": [{"type": "text", "text": f"Crashes on {street}"},
