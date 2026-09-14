@@ -1,27 +1,22 @@
-"""Hypermedia MCP Apps: fixi over tool calls, with and without Django.
+"""Hypermedia MCP Apps with micromcp: htmx over tool calls, with and without Django.
 
-The widget is a static page that never touches the network. `micromcp.page()`
-inlines the MCP Apps bridge and fixi; every `fx-action` becomes a `tools/call`
-the host proxies to this server, and the tool's HTML fragment is swapped in.
+A `Widget` is a static page the host renders in a sandboxed iframe, and
+`@mcp.tool(widget=...)` attaches it to the tool that shows it. Inside the page,
+htmx requests travel as host-proxied `tools/call`, and each app-only tool
+answers with an HTML `fragment`, which also tells the model what changed.
 
-    /mcp          plain micromcp: `fx-action="tool:todo_add"` calls app-only
-                  tools that render fragments with html.escape
-    /django/mcp   Django behind micromcp: `fx-action="/django/ui/todos/add/"`
-                  goes through one app-only tool (`django_routes`) into ordinary
-                  Django views and templates, in-process
+    /mcp          app-only tools render the fragments (html.escape)
+    /django/mcp   Django views and templates render them, through `django_routes`
+    /lab/mcp      the toolkit lab (toolkit_lab.py); /ctx/mcp, its model-context counter
 
 Locally (needs uvicorn and django):
 
     python examples/mcp_app_hypermedia.py
-    open http://127.0.0.1:8770/devhost?mcp=/mcp
-    open http://127.0.0.1:8770/devhost?mcp=/django/mcp
+    open http://127.0.0.1:8770/devhost?mcp=/mcp        # or /django/mcp, /lab/mcp, /ctx/mcp
 
 On Modal (each path is its own custom connector in Claude's settings):
 
     modal deploy examples/mcp_app_hypermedia.py
-
-The widget's footer reports the host's name and whether it advertised
-`serverTools` — the capability this pattern depends on.
 """
 import html
 import os
@@ -31,33 +26,26 @@ import threading
 HERE = pathlib.Path(__file__).resolve().parent
 PORT = int(os.environ.get("PORT", "8770"))
 ORIGINS = {f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}"}   # the local dev host
+HTMX = HERE / "vendor" / "htmx.min.js"                              # htmx 4.0.0, inlined
 
-STYLE = """<style>
+CSS = """
 :root{color-scheme:light dark}
 body{font:14px system-ui;margin:12px;color:var(--color-text-primary,#222)}
 h1{font-size:16px;margin:0 0 8px}ul{list-style:none;padding:0;margin:0 0 8px}
 li{margin:2px 0}li.done span{text-decoration:line-through;opacity:.6}
 button{font:inherit;cursor:pointer}form{display:flex;gap:6px;margin:6px 0}
 input{flex:1;font:inherit}small{display:block;margin-top:8px;opacity:.7}
-</style>"""
-
-STATUS_JS = """
-mcp.ready.then(r => mcp.status("host " + ((r.hostInfo && r.hostInfo.name) || "?") +
-  " · serverTools " + (r.hostCapabilities && r.hostCapabilities.serverTools ? "yes" : "NO")));
-document.addEventListener("fx:swapped", () => mcp.status("updated " + new Date().toLocaleTimeString() +
-  " via tools/call · host " + ((mcp.hostInfo && mcp.hostInfo.name) || "?")));
 """
+SWAP = 'hx-target="#app" hx-swap="innerMorph"'
 
 
-def widget(title: str, first_action: str, route: str | None = None) -> str:
-    from micromcp import page
-    head = STYLE + (f'<meta name="mcp-route" content="{html.escape(route)}">' if route else "")
-    body = (f"<h1>{html.escape(title)}</h1>"
-            f'<div id="app" fx-action="{html.escape(first_action)}" fx-trigger="mcp:ready" '
-            f'fx-swap="innerHTML"><em>connecting&hellip;</em></div>'
-            f"<small data-mcp-status>waiting for the host handshake</small>")
-    return page(body, title=title, head=head,
-                scripts=[(HERE / "vendor" / "fixi.js").read_text(), STATUS_JS])
+def todo_widget(title: str, load: str, route: str | None = None):
+    """The same page for both servers; `load` is the htmx attribute that fetches the list."""
+    from micromcp import Widget
+    return Widget("todos", title=title, styles=CSS, scripts=[HTMX], route=route, border=True,
+                  body=(f"<h1>{html.escape(title)}</h1>"
+                        f'<div id="app" {load} hx-trigger="mcp:ready" {SWAP}>'
+                        f"<em>connecting&hellip;</em></div><small data-mcp-status></small>"))
 
 
 class Todos:
@@ -65,7 +53,7 @@ class Todos:
 
     def __init__(self):
         self.lock = threading.Lock()
-        self.items = [{"id": 1, "text": "Try fixi inside an MCP App", "done": True},
+        self.items = [{"id": 1, "text": "Try htmx inside an MCP App", "done": True},
                       {"id": 2, "text": "Put Django behind micromcp", "done": False}]
         self.next = 3
 
@@ -86,86 +74,75 @@ class Todos:
         with self.lock:
             self.items = [t for t in self.items if not t["done"]]
 
-    def summary(self):
-        return "; ".join(f"[{'x' if t['done'] else ' '}] {t['text']}" for t in self.items) or "(empty)"
+    def context(self, action):
+        """What the model should know after a widget action. Each update replaces the last,
+        so it is a snapshot: a sentence the server writes, and the user-written items as data."""
+        done = sum(t["done"] for t in self.items)
+        return {"text": f"Todo widget, current state: {len(self.items) - done} open and {done} "
+                        f"done (last action: the user {action}).",
+                "data": {"items": [{"text": t["text"], "done": t["done"]} for t in self.items]}}
 
 
-def todo_context(todos, action):
-    """What the model should know after a widget action. Each push replaces the last, so it
-    is a snapshot of the whole list: a sentence the server writes, plus the user-written
-    item text as data."""
-    done = sum(t["done"] for t in todos.items)
-    return {"text": f"Todo widget, current state: {len(todos.items) - done} open and {done} "
-                    f"done (last action: the user {action}).",
-            "data": {"items": [{"text": t["text"], "done": t["done"]} for t in todos.items]}}
-
-
-# --- plain micromcp: tools render fragments ------------------------------------------
+# --- plain micromcp: app-only tools render the fragments ------------------------------
 
 def plain_mcp():
     from micromcp import MCP, fragment
 
-    mcp, todos, uri = MCP("hm-plain", "0.1.0"), Todos(), "ui://hm-plain/todos-v1"
-    target = 'fx-target="#app" fx-swap="innerHTML"'
+    mcp, todos = MCP("hm-plain", "0.1.0"), Todos()
 
     def render():
         rows = "".join(
-            f'<li class="{"done" if t["done"] else ""}"><button type="button" fx-action="tool:todo_toggle" '
-            f'name="id" value="{t["id"]}" {target}>{"&#9745;" if t["done"] else "&#9744;"}</button> '
+            f'<li class="{"done" if t["done"] else ""}"><button type="button" '
+            f'hx-post="tool:todo_toggle?id={t["id"]}" {SWAP}>'
+            f'{"&#9745;" if t["done"] else "&#9744;"}</button> '
             f'<span>{html.escape(t["text"])}</span></li>' for t in todos.items)
         return (f"<ul>{rows}</ul>"
                 f'<form><input name="text" placeholder="New todo" autocomplete="off">'
-                f'<button type="button" fx-action="tool:todo_add" {target}>Add</button></form>'
-                f'<button type="button" fx-action="tool:todo_clear" {target}>Clear done</button>')
+                f'<button type="button" hx-post="tool:todo_add" {SWAP}>Add</button></form>'
+                f'<button type="button" hx-post="tool:todo_clear" {SWAP}>Clear done</button>')
 
-    page_html = widget("Todos (tools)", "tool:todo_list")
-
-    @mcp.resource(uri, title="Todos widget (tools)")
-    def todos_widget() -> str:
-        """Static widget; all data arrives through app-only tool calls."""
-        return page_html
-
-    @mcp.tool(title="Show todos", read_only=True, meta={"ui": {"resourceUri": uri}, "ui/resourceUri": uri})
+    @mcp.tool(widget=todo_widget("Todos", 'hx-post="tool:todo_list"'),
+              title="Show todos", read_only=True)
     def show_todos() -> str:
         """Show the interactive todo list to the user."""
-        return "Todo list: " + todos.summary()
+        return todos.context("opened the list")["text"]
 
     @mcp.tool(visibility="app", read_only=True)
     def todo_list():
-        """Render the todo list (for the widget)."""
+        """Render the todo list (widget only)."""
         return fragment(render())
 
     @mcp.tool(visibility="app")
     def todo_add(text: str = ""):
-        """Add a todo (for the widget)."""
+        """Add a todo (widget only)."""
         todos.add(text)
-        return fragment(render(), context=todo_context(todos, "added an item"))
+        return fragment(render(), context=todos.context("added an item"))
 
     @mcp.tool(visibility="app")
     def todo_toggle(id: str):
-        """Toggle a todo (for the widget)."""
+        """Toggle a todo (widget only)."""
         todos.toggle(id)
-        return fragment(render(), context=todo_context(todos, "toggled an item"))
+        return fragment(render(), context=todos.context("toggled an item"))
 
     @mcp.tool(visibility="app")
     def todo_clear():
-        """Remove finished todos (for the widget)."""
+        """Remove finished todos (widget only)."""
         todos.clear()
-        return fragment(render(), context=todo_context(todos, "cleared finished items"))
+        return fragment(render(), context=todos.context("cleared finished items"))
 
     return mcp
 
 
-# --- Django behind micromcp: views render fragments ------------------------------------
+# --- Django behind micromcp: views and templates render the fragments ------------------
 
 TEMPLATES = {"todos.html": """<ul>{% for t in todos %}
-<li class="{% if t.done %}done{% endif %}"><button type="button" fx-method="post"
-  fx-action="{% url 'todo-toggle' t.id %}" fx-target="#app" fx-swap="innerHTML">{% if t.done %}&#9745;{% else %}&#9744;{% endif %}</button>
+<li class="{% if t.done %}done{% endif %}"><button type="button" hx-post="{% url 'todo-toggle' t.id %}"
+  hx-target="#app" hx-swap="innerMorph">{% if t.done %}&#9745;{% else %}&#9744;{% endif %}</button>
   <span>{{ t.text }}</span></li>{% endfor %}</ul>
 <form><input name="text" placeholder="New todo" autocomplete="off">
-<button type="button" fx-method="post" fx-action="{% url 'todo-add' %}" fx-target="#app" fx-swap="innerHTML">Add</button></form>
-<button type="button" fx-method="post" fx-action="{% url 'todo-clear' %}" fx-target="#app" fx-swap="innerHTML">Clear done</button>
-<small>rendered by Django {{ version }}</small>"""}
+<button type="button" hx-post="{% url 'todo-add' %}" hx-target="#app" hx-swap="innerMorph">Add</button></form>
+<button type="button" hx-post="{% url 'todo-clear' %}" hx-target="#app" hx-swap="innerMorph">Clear done</button>
+<small>rendered by Django {{ version }}</small>"""}  # noqa: E501
 
 
 class URLs:
@@ -188,28 +165,22 @@ def django_asgi():
     from django.shortcuts import redirect, render
     from django.urls import path
     from django.views.decorators.http import require_POST
-    from micromcp import MCP, ASGIServer
-    from micromcp.contrib.django import django_async_view, django_routes, set_mcp_context
+    from micromcp import MCP, ASGIServer, django_async_view, django_routes, set_mcp_context
 
-    mcp, todos, uri = MCP("hm-django", "0.1.0"), Todos(), "ui://hm-django/todos-v1"
-    django_routes(mcp, prefixes=["/django/ui/"], host="localhost")
-    page_html = widget("Todos (Django)", "/django/ui/todos/", route="django_http")
+    mcp, todos = MCP("hm-django", "0.1.0"), Todos()
+    route = django_routes(mcp, prefixes=["/django/ui/"], host="localhost")
 
-    @mcp.resource(uri, title="Todos widget (Django)")
-    def todos_widget() -> str:
-        """Static widget; all data arrives through Django views."""
-        return page_html
-
-    @mcp.tool(title="Show todos", read_only=True, meta={"ui": {"resourceUri": uri}, "ui/resourceUri": uri})
+    @mcp.tool(widget=todo_widget("Todos (Django)", 'hx-get="/django/ui/todos/"', route=route),
+              title="Show todos", read_only=True)
     def show_todos() -> str:
         """Show the interactive todo list to the user."""
-        return "Todo list: " + todos.summary()
+        return todos.context("opened the list")["text"]
 
     def todo_list(request):
         return render(request, "todos.html", {"todos": todos.items, "version": django.get_version()})
 
-    def changed(action):             # redirect back to the list, telling the model what happened
-        ctx = todo_context(todos, action)
+    def changed(action):             # back to the list, telling the model what the list is now
+        ctx = todos.context(action)
         return set_mcp_context(redirect("todo-list"), ctx["text"], ctx["data"])
 
     @require_POST
@@ -238,7 +209,7 @@ def django_asgi():
     return get_asgi_application()
 
 
-# --- one ASGI app for both connectors ---------------------------------------------------
+# --- one ASGI app for every connector ---------------------------------------------------
 
 def build(devhost: bool = False):
     import sys

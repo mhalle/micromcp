@@ -37,7 +37,7 @@ app = modal.App("micromcp-ui")
 @modal.asgi_app()
 def web():
     import json, os, time
-    from micromcp import MCP, ASGIServer, result
+    from micromcp import MCP, ASGIServer, Widget, result
 
     mcp = MCP("newton-civic-ui", "0.1.0")
 
@@ -144,13 +144,9 @@ request("ui/initialize", {appInfo: {name: "crash-widget", version: "0.2.0"},
   .catch(err => status("initialize failed: " + err.message));
 </script></body></html>"""
 
-    @mcp.resource("ui://crash-widget-v4", title="Crash widget",
-                  meta={"ui": {"prefersBorder": True,
-                               "csp": {"resourceDomains": [], "connectDomains": []}}})
-    def crash_widget() -> str:
-        """The widget's HTML, rendered by an MCP Apps host in a sandboxed iframe.
-        Static on purpose: hosts fetch it with their own identity and cache it."""
-        return HTML
+    # A complete document of our own (html=), rendered by the host in a sandboxed iframe. Static
+    # on purpose: hosts fetch it with their own identity and cache it per connector.
+    crash_widget = Widget("crash-widget-v4", html=HTML, title="Crash widget", border=True)
 
     DATA = {"Washington St": {"2020": 5, "2021": 9, "2022": 12, "2023": 7, "2024": 11},
             "Beacon St": {"2020": 2, "2021": 4, "2022": 6, "2023": 9, "2024": 5}}
@@ -161,10 +157,9 @@ request("ui/initialize", {appInfo: {name: "crash-widget", version: "0.2.0"},
             return None
         return {y: n for y, n in years.items() if int(y) >= since}
 
-    # `ui.resourceUri` is the spec's key; the flat `ui/resourceUri` is deprecated
-    # but still emitted by the reference servers, so it is kept until hosts drop it.
-    @mcp.tool(title="Show crash chart", read_only=True,
-              meta={"ui": {"resourceUri": "ui://crash-widget-v4"}, "ui/resourceUri": "ui://crash-widget-v4"})
+    # widget= registers ui://crash-widget-v4 and publishes both the spec's `ui.resourceUri`
+    # and the flat legacy `ui/resourceUri` the reference servers still emit.
+    @mcp.tool(widget=crash_widget, title="Show crash chart", read_only=True)
     def show_crash_chart(street: str = "Washington St") -> dict:
         """Show a chart of crashes by year for a street. The host loads the widget
         from the ui:// resource named in this tool's _meta and feeds it this result.

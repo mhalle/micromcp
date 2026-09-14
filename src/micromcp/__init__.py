@@ -28,7 +28,7 @@ from ._constants import (  # noqa: F401
     SINGLETON_HEADERS, STREAM_BUDGET, UNAUTHORIZED, UNSUPPORTED_VERSION, WELL_KNOWN,
     WORKERS, log,
 )
-from .apps import BRIDGE_JS, CONTEXT_META, fragment, page
+from .apps import BRIDGE_JS, CONTEXT_META, Widget, fragment, page
 from .asgi import ASGIServer
 from .core import (  # noqa: F401
     MCP_APP_MIME, Result, _Core, _Pool, _decode_hdr, _encode, embedded_resource, result,
@@ -45,7 +45,7 @@ __version__ = "0.1.0"
 __all__ = [
     "MCP", "Server", "ASGIServer", "Context", "Principal", "Error", "Unauthorized",
     "result", "Result", "embedded_resource", "MCP_APP_MIME",
-    "page", "fragment", "BRIDGE_JS", "CONTEXT_META", "django_routes", "set_mcp_context",
+    "page", "fragment", "BRIDGE_JS", "Widget", "CONTEXT_META", "django_routes", "set_mcp_context",
     "django_view", "django_async_view", "__version__",
 ]
 

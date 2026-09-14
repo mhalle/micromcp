@@ -56,9 +56,20 @@ const ui = t => (t && t._meta && t._meta.ui) || {};
 const vis = t => ui(t).visibility || ["model", "app"];
 const uri = t => ui(t).resourceUri || (t && t._meta && t._meta["ui/resourceUri"]);
 const post = m => { log("out", "host → app", m); frame.contentWindow.postMessage(m, "*"); };
-// ?csp=strict (default, the MCP Apps spec's policy: no eval), eval (adds 'unsafe-eval'), none
+// The widget's policy, built the way a host builds it from the resource's _meta.ui.csp: the spec's
+// default (no eval, no network) plus the declared origins. ?csp=eval adds 'unsafe-eval' (Claude
+// allows eval); ?csp=none renders with no policy at all.
 const CSP_MODE = P.get("csp") || "strict";
-const CSP = CSP_MODE === "none" ? "" : `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'${CSP_MODE === "eval" ? " 'unsafe-eval'" : ""}; style-src 'unsafe-inline'; img-src data:">`;
+function cspTag(csp) {
+  if (CSP_MODE === "none") return "";
+  const list = k => ((csp && csp[k]) || []).map(d => String(d).replace(/[^\w:/.*-]/g, "")).join(" ");
+  const res = list("resourceDomains"), con = list("connectDomains"), frm = list("frameDomains");
+  const policy = ["default-src 'none'",
+    `script-src 'unsafe-inline'${CSP_MODE === "eval" ? " 'unsafe-eval'" : ""} ${res}`,
+    `style-src 'unsafe-inline' ${res}`, `img-src data: ${res}`, `font-src ${res || "'none'"}`,
+    `media-src ${res || "'none'"}`, `connect-src ${con || "'none'"}`, `frame-src ${frm || "'none'"}`];
+  return `<meta http-equiv="Content-Security-Policy" content="${policy.join("; ")}">`;
+}
 
 window.addEventListener("message", async ev => {
   if (ev.source !== frame.contentWindow) return;
@@ -116,8 +127,8 @@ window.addEventListener("message", async ev => {
     " · app-only: " + list.filter(t => !vis(t).includes("model")).map(t => t.name).join(", ");
   if (!main) return;
   const res = await rpc("resources/read", {uri: uri(main)}, uri(main));
-  const html = res.contents[0].text;
-  frame.srcdoc = html.replace(/<head>/i, "<head>" + CSP);
+  const c0 = res.contents[0];
+  frame.srcdoc = c0.text.replace(/<head>/i, "<head>" + cspTag(((c0._meta || {}).ui || {}).csp));
 })().catch(e => log("err", "dev host failed", String(e)));
 </script>
 </body></html>

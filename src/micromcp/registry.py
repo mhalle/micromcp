@@ -143,7 +143,7 @@ class MCP:
     def tool(self, fn=None, *, name=None, title=None, guards=(),
              annotations=None, output_schema=None, read_only=None,
              destructive=None, idempotent=None, replace=False, meta=None,
-             visibility=None):
+             visibility=None, widget=None):
         """Register a tool.
 
         title       human-readable label for UIs
@@ -161,6 +161,8 @@ class MCP:
                     default). An app-only tool is hidden from the model by
                     the host and callable by the server's widgets; it is still
                     an ordinary tool to any other client, so guard it.
+        widget      a `micromcp.Widget` this tool shows: its `ui://` resource
+                    is registered (once) and named in the tool's `_meta`
 
         Arguments are validated against the generated schema and converted to
         the declared Python types (dates, enums, sets, dataclasses, pydantic
@@ -187,6 +189,19 @@ class MCP:
                 entry["annotations"] = ann
             if meta:
                 entry["_meta_out"] = _meta_ok(meta, f"tool {n!r}")
+            if widget is not None:
+                uri = getattr(widget, "uri", None)
+                if not isinstance(uri, str) or not callable(getattr(widget, "_attach", None)):
+                    raise TypeError(f"tool {n!r}: widget must be a micromcp.Widget")
+                mo = entry.setdefault("_meta_out", {})
+                ui = mo.get("ui", {})
+                if not isinstance(ui, dict):
+                    raise ValueError(f"tool {n!r}: meta 'ui' must be a dict to add a widget")
+                if ui.get("resourceUri", uri) != uri or mo.get("ui/resourceUri", uri) != uri:
+                    raise ValueError(f"tool {n!r}: widget= conflicts with meta's resourceUri")
+                # the spec's key, plus the flat legacy key hosts of the reference servers read
+                mo["ui"] = {**ui, "resourceUri": uri}
+                mo["ui/resourceUri"] = uri
             if visibility is not None:
                 vis = [visibility] if isinstance(visibility, str) else list(visibility)
                 if not vis or len(set(vis)) != len(vis) \
@@ -202,6 +217,8 @@ class MCP:
             out = _output_schema(f, output_schema)
             if out:
                 entry["outputSchema"] = out
+            if widget is not None:
+                widget._attach(self)           # last, so a refused tool registers nothing
             self.tools[n] = entry
             return f
         return wrap(fn) if fn else wrap

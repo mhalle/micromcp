@@ -17,6 +17,13 @@
 ## Unreleased (branch `apps-hypermedia`)
 
 ### MCP Apps
+- `Widget(name, body= | html=, scripts=, modules=, styles=, route=, fetch=,
+  csp=, border=)` declares a widget once; `@mcp.tool(widget=...)` registers
+  its `ui://` resource on first use and fills in the tool's `_meta`
+  (`ui.resourceUri` and the legacy `ui/resourceUri`). Assets are source
+  text, `pathlib.Path`s (inlined), or https URLs (their origins declared in
+  `csp.resourceDomains` automatically). `django_routes` returns its tool
+  name for `route=`.
 - `@mcp.tool(visibility="app" | "model" | [...])` publishes
   `_meta.ui.visibility`; app-only tools are hidden from the model by the host
   and callable by the server's widgets.
