@@ -213,10 +213,10 @@ feed.onclose = e => mcp.status(`disconnected (${e.code}${e.reason ? ": " + e.rea
 
 
 def scene_mcp():
-    from micromcp import MCP, Widget
+    from micromcp import MCP, Widget, result
 
     mcp, scene = MCP("hm-3d", "0.1.0"), Scene()
-    viewer = Widget("scene3d", title="3D scene", border=True, styles=CSS, body=BODY,
+    viewer = Widget("scene3d-v2", title="3D scene", border=True, styles=CSS, body=BODY,
                     imports={"three": THREE + "build/three.module.js",
                              "three/addons/": THREE + "examples/jsm/"},
                     modules=[VIEWER_JS])
@@ -267,12 +267,25 @@ def scene_mcp():
         changed()
         return "The scene is empty."
 
+    # Hosts cache a connector's widget, so widgets fetched before channels existed still poll
+    # this tool after a redeploy. Keep what old widgets call working.
+    @mcp.tool(visibility="app", read_only=True)
+    def scene_state():
+        """The scene as data, for widgets from before the scene channel (widget only)."""
+        snap = scene.snapshot()
+        return result([{"type": "text", "text": f"scene version {snap['version']}"}],
+                      structured=snap)
+
     return mcp
 
 
 def build(devhost: bool = False):
     from micromcp import ASGIServer
-    inner = ASGIServer(scene_mcp(), path="/mcp", allowed_origins=ORIGINS)
+    mcp = scene_mcp()
+    inner = ASGIServer(mcp, path="/mcp", allowed_origins=ORIGINS)
+    # The same server at a second path: a new connector there fetches the current widget,
+    # where the host's cached copy for /mcp may be an older one.
+    v2 = ASGIServer(mcp, path="/v2/mcp", allowed_origins=ORIGINS)
     dev = (HERE / "devhost.html").read_bytes() if devhost else None
 
     async def app(scope, receive, send):
@@ -284,7 +297,8 @@ def build(devhost: bool = False):
             h = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
             print(f"WIRE {scope['method']} {scope['path']} method={h.get('mcp-method', '-')} "
                   f"name={h.get('mcp-name', '-')} ua={h.get('user-agent', '-')[:30]!r}", flush=True)
-        return await inner(scope, receive, send)
+        server = v2 if scope.get("path", "").startswith("/v2/") else inner
+        return await server(scope, receive, send)
     return app
 
 
