@@ -1295,10 +1295,94 @@ def round3():
     check("a stopped loop is rebuilt", lp.run(asyncio.sleep(0), 2), None)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# UI apps (MCP-UI / MCP Apps): tool/resource/prompt meta, content pass-through,
+# result _meta. Every emitted shape is validated against mcp-types.
+# ═══════════════════════════════════════════════════════════════════════════
+def apps():
+    global OK, FAIL
+    from micromcp import embedded_resource, META_SERVER
+    try:
+        from mcp_types.methods import validate_server_result
+    except ImportError:
+        validate_server_result = None
+    HTML = "<html><body><h1>widget</h1></body></html>"
+    ma = MCP("ui-demo", "0.1.0")
+    @ma.resource("ui://widget", mime_type="text/html;profile=mcp-app", meta={"ui": {"csp": {"resourceDomains": []}}})
+    def widget() -> str: return HTML
+    @ma.resource("ui://chart/{cid}", mime_type="text/html", meta={"kind": "chart"})
+    def chart(cid: int) -> str: return f"<svg id='{cid}'/>"
+    @ma.tool(meta={"ui": {"resourceUri": "ui://widget"}})
+    def show() -> dict:
+        """Render the widget."""
+        return {"content": [{"type": "text", "text": "rendering"},
+                            embedded_resource("ui://widget", text=HTML, mime_type="text/html;profile=mcp-app",
+                                              meta={"ui": {"prefersBorder": True}})],
+                "structuredContent": {"shown": True}, "_meta": {"ui": {"height": 300}}}
+    @ma.tool
+    def blobby() -> dict:
+        return {"content": [embedded_resource("ui://img", blob=b"\x89PNG", mime_type="image/png")]}
+    @ma.tool
+    def plain_dict_with_content_key() -> dict:
+        return {"content": "not a list of blocks", "other": 1}       # data, not a result
+    @ma.tool
+    def failing() -> dict:
+        return {"content": [{"type": "text", "text": "nope"}], "isError": True}
+    @ma.tool(output_schema={"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]})
+    def declared_no_structured() -> dict:
+        return {"content": [{"type": "text", "text": "x"}]}
+    @ma.prompt(meta={"ui": {"kind": "wizard"}})
+    def wiz(topic: str) -> str: return topic
+    srv = Server(ma)
+    def rpc(method, params=None):
+        params = dict(params or {}); params["_meta"] = {META_VER: PROTOCOL, META_CAPS: {}}
+        raw = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
+        env = {"REQUEST_METHOD": "POST", "CONTENT_LENGTH": str(len(raw)), "wsgi.input": io.BytesIO(raw),
+               "HTTP_MCP_PROTOCOL_VERSION": PROTOCOL, "HTTP_MCP_METHOD": method}
+        nm = params.get("uri") if method == "resources/read" else params.get("name")
+        if nm: env["HTTP_MCP_NAME"] = nm
+        bx = {}; out = b"".join(srv(env, lambda s, h: bx.update(s=s)))
+        r = json.loads(out)
+        if validate_server_result and "result" in r:
+            try:
+                validate_server_result(method, PROTOCOL, r["result"])
+            except Exception as e:
+                check(f"mcp-types conformance for {method}", str(e)[:120], "conforms")
+        return r
+    print("\n— UI apps: meta on tools/resources/prompts —")
+    t = rpc("tools/list")["result"]["tools"]
+    show_t = next(x for x in t if x["name"] == "show")
+    check("tool meta published as _meta", show_t.get("_meta"), {"ui": {"resourceUri": "ui://widget"}})
+    check("no other underscore keys leak", [k for k in show_t if k.startswith("_")], ["_meta"])
+    check("tools without meta have no _meta", "_meta" in next(x for x in t if x["name"] == "blobby"), False)
+    check("resource meta in resources/list", rpc("resources/list")["result"]["resources"][0].get("_meta"), {"ui": {"csp": {"resourceDomains": []}}})
+    check("template meta in templates/list", rpc("resources/templates/list")["result"]["resourceTemplates"][0].get("_meta"), {"kind": "chart"})
+    rd = rpc("resources/read", {"uri": "ui://widget"})["result"]["contents"][0]
+    check("resource read carries mimeType + _meta", (rd["mimeType"], rd.get("_meta")), ("text/html;profile=mcp-app", {"ui": {"csp": {"resourceDomains": []}}}))
+    check("template read carries meta", rpc("resources/read", {"uri": "ui://chart/7"})["result"]["contents"][0].get("_meta"), {"kind": "chart"})
+    check("prompt meta in prompts/list", rpc("prompts/list")["result"]["prompts"][0].get("_meta"), {"ui": {"kind": "wizard"}})
+
+    print("— UI apps: content pass-through and result _meta —")
+    c = rpc("tools/call", {"name": "show", "arguments": {}})["result"]
+    check("content blocks passed through", [b["type"] for b in c["content"]], ["text", "resource"])
+    check("embedded resource shape", c["content"][1]["resource"],
+          {"uri": "ui://widget", "mimeType": "text/html;profile=mcp-app", "text": HTML, "_meta": {"ui": {"prefersBorder": True}}})
+    check("structuredContent kept", c.get("structuredContent"), {"shown": True})
+    check("result _meta merged with serverInfo", c["_meta"], {"ui": {"height": 300}, META_SERVER: {"name": "ui-demo", "version": "0.1.0"}})
+    check("blob embedded resource is base64", rpc("tools/call", {"name": "blobby", "arguments": {}})["result"]["content"][0]["resource"].get("blob"), "iVBORw==")
+    d = rpc("tools/call", {"name": "plain_dict_with_content_key", "arguments": {}})["result"]
+    check("a dict whose content is not blocks is data", (d["content"][0]["type"], d.get("structuredContent")),
+          ("text", {"content": "not a list of blocks", "other": 1}))
+    check("isError passes through", rpc("tools/call", {"name": "failing", "arguments": {}})["result"].get("isError"), True)
+    check("declared outputSchema still requires structuredContent",
+          rpc("tools/call", {"name": "declared_no_structured", "arguments": {}})["result"].get("isError"), True)
+
+
 if __name__ == "__main__":
     main()
     medium()
     round2()
     round3()
+    apps()
     print(f"\n{OK} passed, {FAIL} failed")
     raise SystemExit(1 if FAIL else 0)

@@ -15,6 +15,12 @@ First packaged release. Same public API as the original single file:
   `offload_bytes`, `stream_budget`, `workers`, `timeout`, `max_body`) are
   constructor options; the module constants are only their defaults.
 
+### UI apps
+- `meta=` on tools, resources, templates, and prompts is published as
+  `_meta`; handlers may return finished results (content blocks, `isError`,
+  `_meta`); `embedded_resource()` builds the block MCP-UI / MCP Apps hosts
+  render.
+
 ### Hardening (three rounds of adversarial review, 2026-09-13)
 - Principal/Context detection is structural and fail-closed: works through
   Optional, Union, Annotated, PEP 695 aliases, callable instances, partials;

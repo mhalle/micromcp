@@ -109,6 +109,40 @@ Prompt arguments arrive as strings and are coerced to the handler's `int`,
 `float`, or `bool` hints; `Principal` and `Context` parameters are injected
 exactly as for tools, and docstring `Args:` become argument descriptions.
 
+## UI apps (MCP-UI / MCP Apps)
+
+A host that renders UI needs three things from a server, and all three are
+plain registration options:
+
+```python
+HTML = open("widget.html").read()
+
+@mcp.resource("ui://crash-widget", mime_type="text/html;profile=mcp-app",
+              meta={"ui": {"csp": {"resourceDomains": []}}})
+def crash_widget() -> str:
+    return HTML
+
+@mcp.tool(meta={"ui": {"resourceUri": "ui://crash-widget"}})   # published as _meta
+def show_crashes(street: str) -> dict:
+    return {
+        "content": [{"type": "text", "text": f"Crashes on {street}"},
+                    embedded_resource("ui://crash-widget", text=HTML,
+                                      mime_type="text/html;profile=mcp-app")],
+        "structuredContent": {"street": street, "count": 11},
+        "_meta": {"ui": {"height": 400}},
+    }
+```
+
+`meta=` on a tool, resource, template, or prompt is published as its `_meta`
+in listings (and on a resource's read contents). A handler that returns a
+dict whose `content` is a list of typed blocks is treated as a finished
+result and passed through verbatim — including `structuredContent`,
+`isError`, and its own `_meta`, which is merged with the server's identity
+stamp. `embedded_resource(...)` builds the block MCP-UI and MCP Apps hosts
+render; a `blob=` makes it base64. A declared `outputSchema` still requires
+`structuredContent`. Everything the iframe does afterwards arrives as
+ordinary `tools/call` requests through the host.
+
 ## Injected parameters
 
 Two annotations are filled server-side and excluded from the input schema, so
@@ -284,7 +318,7 @@ test_asgi.py        native ASGI under uvicorn and mounted in Starlette
 test_progress.py    24 SSE checks: ordering, cancellation, WSGI degradation
 harnesses.py        wsgiref, Flask, Starlette, waitress, gunicorn
 ergonomics.py       API tour, 12 assertions
-test_hardening.py   212 regression checks from three adversarial reviews
+test_hardening.py   228 regression checks from three adversarial reviews + UI apps
 test_defender.py    60 checks from the defensive audit (mutation-derived)
 ```
 

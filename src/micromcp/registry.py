@@ -108,7 +108,7 @@ class MCP:
 
     def tool(self, fn=None, *, name=None, title=None, guards=(),
              annotations=None, output_schema=None, read_only=None,
-             destructive=None, idempotent=None, replace=False):
+             destructive=None, idempotent=None, replace=False, meta=None):
         """Register a tool.
 
         title       human-readable label for UIs
@@ -120,6 +120,8 @@ class MCP:
                     TypedDict or dataclass return annotation when omitted.
                     Results are validated against it before being sent.
         replace     allow re-registering an existing name (default: error)
+        meta        published as the tool's `_meta` (e.g. an MCP Apps
+                    `{"ui": {"resourceUri": "ui://..."}}` pointer)
 
         Arguments are validated against the generated schema and converted to
         the declared Python types (dates, enums, sets, dataclasses, pydantic
@@ -144,6 +146,8 @@ class MCP:
                 entry["title"] = title
             if ann:
                 entry["annotations"] = ann
+            if meta:
+                entry["_meta_out"] = dict(meta)
             out = _output_schema(f, output_schema)
             if out:
                 entry["outputSchema"] = out
@@ -152,7 +156,7 @@ class MCP:
         return wrap(fn) if fn else wrap
 
     def resource(self, uri: str, *, mime_type="text/plain", title=None, guards=(),
-                 replace=False):
+                 replace=False, meta=None):
         """Register a resource. A `{braced}` segment makes it a template:
 
             @mcp.resource("crash://{crash_id}")
@@ -163,7 +167,10 @@ class MCP:
         wins. `Principal` and `Context` parameters are injected as for tools.
         A handler returning `bytes` is delivered as a base64 `blob`. Guards are
         evaluated on read and on listing, before any parameter is parsed; a
-        denied resource is indistinguishable from a missing one.
+        denied resource is indistinguishable from a missing one. `meta` is
+        published as `_meta` in listings and on the read contents — a `ui://`
+        resource serving `text/html;profile=mcp-app` is registered like any
+        other.
         """
         def wrap(f):
             rx, params = _compile_template(uri)
@@ -173,6 +180,8 @@ class MCP:
                      "_principal": inject["principal"], "_context": inject["context"]}
             if title:
                 entry["title"] = title
+            if meta:
+                entry["_meta_out"] = dict(meta)
             registry = self.templates if rx is not None else self.resources
             if uri in registry and not replace:
                 raise ValueError(f"resource {uri!r} is already registered (pass replace=True)")
@@ -185,7 +194,8 @@ class MCP:
             return f
         return wrap
 
-    def prompt(self, fn=None, *, name=None, title=None, guards=(), replace=False):
+    def prompt(self, fn=None, *, name=None, title=None, guards=(), replace=False,
+               meta=None):
         """Register a prompt. Arguments arrive as strings and are coerced to the
         handler's `int`/`float`/`bool` hints; `Principal`/`Context` parameters
         are injected exactly as for tools."""
@@ -207,6 +217,8 @@ class MCP:
                      "_principal": inject["principal"], "_context": inject["context"]}
             if title:
                 entry["title"] = title
+            if meta:
+                entry["_meta_out"] = dict(meta)
             self.prompts[n] = entry
             return f
         return wrap(fn) if fn else wrap

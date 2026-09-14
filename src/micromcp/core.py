@@ -82,7 +82,37 @@ def _jsonable(o):
     raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
 
 
+def embedded_resource(uri: str, *, mime_type: str = "text/html", text: str | None = None,
+                      blob: bytes | None = None, meta: dict | None = None) -> dict:
+    """An embedded-resource content block, the shape MCP-UI and MCP Apps hosts
+    render: return it (inside a `content` list) from a tool handler.
+
+        return {"content": [embedded_resource("ui://chart/1", text=html,
+                                               mime_type="text/html;profile=mcp-app")]}
+    """
+    res: dict = {"uri": uri, "mimeType": mime_type}
+    if blob is not None:
+        res["blob"] = base64.b64encode(blob).decode()
+    else:
+        res["text"] = text if text is not None else ""
+    if meta:
+        res["_meta"] = dict(meta)
+    return {"type": "resource", "resource": res}
+
+
+def _is_result(value) -> bool:
+    """A handler may hand back a finished result — a dict whose `content` is a
+    list of typed blocks — to control content types, `isError`, or `_meta`
+    itself. Anything else is data and gets wrapped."""
+    return (isinstance(value, dict) and isinstance(value.get("content"), list)
+            and all(isinstance(b, dict) and isinstance(b.get("type"), str)
+                    for b in value["content"])
+            and set(value) <= {"content", "structuredContent", "isError", "_meta"})
+
+
 def _as_content(value) -> dict:
+    if _is_result(value):
+        return dict(value)
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         value = dataclasses.asdict(value)
     elif callable(getattr(value, "model_dump", None)):      # pydantic, no import
@@ -444,8 +474,15 @@ class _Core:
             return out
 
         def public(entries):
-            return [{k: v for k, v in e.items() if not k.startswith("_")}
-                    for e in list(entries) if _allowed(e, principal)]
+            out = []
+            for e in list(entries):
+                if not _allowed(e, principal):
+                    continue
+                item = {k: v for k, v in e.items() if not k.startswith("_")}
+                if e.get("_meta_out"):
+                    item["_meta"] = e["_meta_out"]
+                out.append(item)
+            return out
 
         def inject(entry, kwargs):
             if entry["_principal"]:
@@ -522,6 +559,8 @@ class _Core:
                 item["blob"] = base64.b64encode(value).decode()
             else:
                 item["text"] = value if isinstance(value, str) else str(value)
+            if entry.get("_meta_out"):
+                item["_meta"] = entry["_meta_out"]
             return {"contents": [item]}
 
         if method == "prompts/get":
