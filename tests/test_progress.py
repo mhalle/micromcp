@@ -5,7 +5,7 @@ where the client abstracts away what we need to assert.
 """
 import asyncio, io, json, socket, threading, time
 import httpx
-from micromcp import MCP, Server, ASGIServer, Context, PROTOCOL, META_VER, META_CAPS
+from micromcp import MCP, Server, ASGIServer, Context, PROTOCOL, META_VER, META_CAPS, META_SUB
 from _helpers import free_port
 
 mcp = MCP("demo", "0.1.0")
@@ -162,8 +162,6 @@ async def main():
     check("SDK client got progress", len(seen), 4)
 
     print("\n— subscriptions/listen closes gracefully —")
-    from micromcp._constants import META_SUB
-
     def listen_body(rid, subs):
         return {"jsonrpc": "2.0", "id": rid, "method": "subscriptions/listen",
                 "params": {"_meta": {META_VER: PROTOCOL, META_CAPS: {}},
