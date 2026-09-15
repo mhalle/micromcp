@@ -333,6 +333,25 @@ will not replay a POST across a redirect. `django_async_view` streams
 Context tools as a `StreamingHttpResponse` of SSE frames; `django_view` (sync)
 returns plain JSON.
 
+## Constants
+
+The names above are the everyday API (and `micromcp.__all__`). Protocol
+constants and the defaults behind the constructor's tunables are importable
+from `micromcp` too, for tests, proxies, and clients that speak the wire
+format:
+
+| Group | Names |
+|---|---|
+| Protocol | `PROTOCOL` (`"2026-07-28"`), `LEGACY_VERSIONS`, `WELL_KNOWN` |
+| `_meta` keys | `META_VER`, `META_CAPS`, `META_CLIENT`, `META_SERVER`, `META_SUB` |
+| Error codes | `PARSE_ERROR`, `INVALID_REQUEST`, `METHOD_NOT_FOUND`, `INVALID_PARAMS`, `INTERNAL_ERROR`, `HEADER_MISMATCH`, `UNSUPPORTED_VERSION`, `UNAUTHORIZED` |
+| Methods and headers | `HANDSHAKE_METHODS`, `LIST_METHODS`, `ROUTING_HEADERS`, `SINGLETON_HEADERS`, `CORS_HEADERS` |
+| Tunable defaults | `MAX_BODY`, `MAX_URI`, `MAX_DEPTH`, `OFFLOAD_BYTES`, `QUEUE_SIZE`, `STREAM_BUDGET`, `KEEPALIVE`, `CANCEL_GRACE`, `WORKERS` |
+
+The tunables are defaults only: change them per server with the constructor
+arguments shown under Auth, not by assigning to the module. `log` is the
+`"micromcp"` logger (`logging.getLogger("micromcp")` is the same object).
+
 ## Scope
 
 Implemented: `server/discover`, `tools/list`, `tools/call`, `resources/list`,

@@ -17,7 +17,10 @@ SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
 
-from ._constants import (
+# Protocol constants, error codes, and tunable defaults: importable from here
+# (`from micromcp import PROTOCOL, MAX_BODY`), documented in the README's
+# "Constants" section, and left out of `__all__`, which is the everyday API.
+from ._constants import (  # noqa: F401
     CANCEL_GRACE, CORS_HEADERS, HANDSHAKE_METHODS, HEADER_MISMATCH, INTERNAL_ERROR,
     INVALID_PARAMS, INVALID_REQUEST, KEEPALIVE, LEGACY_VERSIONS, LIST_METHODS, MAX_BODY,
     MAX_DEPTH, MAX_URI, META_CAPS, META_CLIENT, META_SERVER, META_SUB, META_VER,
@@ -41,14 +44,7 @@ __version__ = "0.1.0"
 __all__ = [
     "MCP", "Server", "ASGIServer", "Context", "Principal", "Error", "Unauthorized",
     "result", "Result", "embedded_resource", "MCP_APP_MIME",
-    "PROTOCOL", "LEGACY_VERSIONS", "META_VER", "META_CAPS", "META_SERVER", "META_SUB",
-    "META_CLIENT", "WELL_KNOWN",
-    "PARSE_ERROR", "INVALID_REQUEST", "METHOD_NOT_FOUND", "INVALID_PARAMS",
-    "INTERNAL_ERROR", "HEADER_MISMATCH", "UNSUPPORTED_VERSION", "UNAUTHORIZED",
-    "HANDSHAKE_METHODS", "LIST_METHODS", "ROUTING_HEADERS", "SINGLETON_HEADERS",
-    "CORS_HEADERS", "MAX_BODY", "MAX_URI", "MAX_DEPTH", "OFFLOAD_BYTES",
-    "QUEUE_SIZE", "STREAM_BUDGET", "KEEPALIVE", "CANCEL_GRACE", "WORKERS",
-    "django_view", "django_async_view", "log", "__version__",
+    "django_view", "django_async_view", "__version__",
 ]
 
 
