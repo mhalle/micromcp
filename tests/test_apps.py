@@ -1,4 +1,4 @@
-"""micromcp-apps: fragments, model context, widget pages, Widget, channels,
+"""micromcp.apps: fragments, model context, widget pages, Widget, channels,
 and Django views served to widgets through django_routes.
 
 The bridge's JavaScript is exercised end to end in examples/devhost.html (see
@@ -13,9 +13,15 @@ import subprocess
 import sys
 import tempfile
 
+try:
+    import micromcp.apps  # noqa: F401
+except ModuleNotFoundError:            # the single-file bundle carries only the core
+    print("skip: micromcp.apps is not part of the single-file bundle")
+    sys.exit(0)
+
 from micromcp import META_CAPS, META_SERVER, META_VER, MCP, PROTOCOL, Server
-from micromcp_apps import BRIDGE_JS, CONTEXT_META, Channel, Widget, fragment, page
-from micromcp_apps.django import django_routes, set_mcp_context
+from micromcp.apps import BRIDGE_JS, CONTEXT_META, Channel, Widget, fragment, page
+from micromcp.apps.django import django_routes, set_mcp_context
 
 OK = FAIL = 0
 
@@ -512,6 +518,26 @@ check("an open beyond max_connections is refused",
       ctool("channel_open", {"channel": "few"})["conn"], None)
 ctool("channel_close", {"conn": k1})
 check("... until one closes", bool(ctool("channel_open", {"channel": "few"})["conn"]), True)
+
+# ── the boundary with the core ─────────────────────────────────────────────
+print("boundary")
+import ast  # noqa: E402
+
+import micromcp  # noqa: E402
+
+used = set()
+for src in (pathlib.Path(micromcp.__file__).parent / "apps").glob("*.py"):
+    for node in ast.walk(ast.parse(src.read_text())):
+        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module \
+                and node.module.split(".")[0] == "micromcp":
+            used |= ({a.name for a in node.names} if node.module == "micromcp"
+                     else {f"<{node.module}>"})
+        elif isinstance(node, ast.ImportFrom) and node.level > 1:
+            used.add(f"<{'.' * node.level}{node.module or ''}>")
+check("micromcp.apps imports only micromcp's public API", sorted(used - set(micromcp.__all__)), [])
+check("import micromcp does not load micromcp.apps",
+      subprocess.run([sys.executable, "-c", "import micromcp, sys; print('micromcp.apps' in sys.modules)"],
+                     capture_output=True, text=True).stdout.strip(), "False")
 
 print(f"\n{OK} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

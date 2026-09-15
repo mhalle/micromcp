@@ -191,7 +191,7 @@
     mcp.say(el.getAttribute("data-mcp-say")).then(r => status("message to the model: " + r));
   });
   // Channels: a WebSocket-compatible socket over the server's channel_* tools (see
-  // micromcp_apps.Channel). mcp.channel(name, params) opens one; mcp.WebSocket is the constructor,
+  // micromcp.apps.Channel). mcp.channel(name, params) opens one; mcp.WebSocket is the constructor,
   // for libraries that take one ("mcp:<channel>?query"). Frames are text, as on a WebSocket;
   // the server pushes them through a long poll (channel_recv) that returns as soon as one is
   // queued. Sends are delivered in order.

@@ -37,7 +37,7 @@ def django_routes(mcp, *, prefixes, name: str = "django_http", host: str = "loca
     """Register an app-only tool that serves Django views to an MCP Apps widget.
 
     The widget's hypermedia requests (`fx-action="/app/todos/"`, sent by
-    `micromcp_apps.BRIDGE_JS` when the page has `<meta name="mcp-route"
+    `micromcp.apps.BRIDGE_JS` when the page has `<meta name="mcp-route"
     content="django_http">`) arrive as tool calls `{method, path, body}` and
     are dispatched in-process through Django's full handler — URL resolver,
     middleware, views, templates — the way Django's test client does. The

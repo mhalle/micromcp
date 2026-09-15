@@ -214,7 +214,7 @@ feed.onclose = e => mcp.status(`disconnected (${e.code}${e.reason ? ": " + e.rea
 
 def scene_mcp():
     from micromcp import MCP, result
-    from micromcp_apps import Channel, Widget
+    from micromcp.apps import Channel, Widget
 
     mcp, scene = MCP("hm-3d", "0.1.0"), Scene()
     viewer = Widget("scene3d-v2", title="3D scene", border=True, styles=CSS, body=BODY,
@@ -282,7 +282,7 @@ def scene_mcp():
 
 def build(devhost: bool = False):
     from micromcp import ASGIServer
-    from micromcp_apps import DEVHOST_HTML
+    from micromcp.apps import DEVHOST_HTML
     mcp = scene_mcp()
     inner = ASGIServer(mcp, path="/mcp", allowed_origins=ORIGINS)
     # The same server at a second path: a new connector there fetches the current widget,
@@ -311,9 +311,8 @@ except ImportError:
 
 if modal is not None:
     image = (modal.Image.debian_slim(python_version="3.12")
-             .env({"PYTHONPATH": "/root/src:/root/apps_src", "WIRE_LOG": "1"})
-             .add_local_dir(HERE.parent.parent / "src", "/root/src")        # micromcp
-             .add_local_dir(HERE.parent / "src", "/root/apps_src"))         # micromcp-apps
+             .env({"PYTHONPATH": "/root/src", "WIRE_LOG": "1"})
+             .add_local_dir(HERE.parent / "src", "/root/src"))
     app = modal.App("micromcp-3d")
 
     @app.function(image=image, max_containers=1, timeout=600)
