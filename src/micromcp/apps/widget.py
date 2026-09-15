@@ -31,8 +31,8 @@ import os
 import pathlib
 import re
 import weakref
-from typing import Protocol
-from urllib.parse import urlsplit
+from typing import Any, Protocol
+from urllib.parse import quote, urlencode, urlsplit
 
 from micromcp import Result, result
 
@@ -106,26 +106,67 @@ class SupportsHTML(Protocol):
     def __html__(self) -> str: ...
 
 
+# What the HTML arguments take: a str or a `SupportsHTML`. Spelled `Any` because
+# fastcore attaches `FT.__html__` at runtime, where static checkers cannot see it.
+HTMLLike = Any
+
+
+def _html_method(value):
+    """`value.__html__`, found the way Python finds special methods: in the
+    class's MRO, not through a `__getattr__` (the instance's or the
+    metaclass's) and not in the instance's own dict. None when absent or
+    set to None, Python's spelling of "not supported"."""
+    for klass in type(value).__mro__:
+        if "__html__" in vars(klass):
+            attr = vars(klass)["__html__"]
+            if attr is None:
+                return None
+            get = getattr(type(attr), "__get__", None)
+            return get(attr, value, type(value)) if get is not None else attr
+    return None
+
+
 def _markup(value, what) -> str:
-    """HTML from a str, or from an object whose class defines `__html__`. Such
-    an object vouches that its output is escaped, so it is used as rendered.
-    The method must be on the class, where Python looks for special methods,
-    so a `__getattr__` that answers every name does not make an object
-    markup. The result is an exact str: a subclass such as `Markup` escapes
-    whatever is concatenated with it, which would escape the page around it."""
-    if not isinstance(value, str):
-        if not hasattr(type(value), "__html__"):
-            raise TypeError(f"{what} must be a str or an object with __html__ (FastHTML "
-                            f"components, htpy, markupsafe.Markup), not {type(value).__name__}")
-        value = value.__html__()
-        if not isinstance(value, str):
+    """HTML from an object whose class defines `__html__`, or from a str. As
+    in markupsafe, `__html__` wins, so a str subclass that renders itself (a
+    badge enum, a text type that escapes itself) is rendered through it, not
+    used as its plain str value. Such an object vouches that its output is
+    escaped, so it is used as rendered. A proxy that only claims to be a str is refused. The result
+    is an exact str: a subclass such as `Markup` escapes whatever is
+    concatenated with it, which would escape the page around it."""
+    render = _html_method(value)
+    if render is not None:
+        value = render()
+        if not issubclass(type(value), str):
             raise TypeError(f"{what}: __html__() returned {type(value).__name__}, not str")
+    elif not issubclass(type(value), str):
+        raise TypeError(f"{what} must be a str or an object with __html__ (FastHTML "
+                        f"components, htpy, markupsafe.Markup), not {type(value).__name__}")
     return str.__str__(value)
+
+
+def tool_url(name: str, /, **args) -> str:
+    """A `tool:` URL for a hypermedia attribute (`hx-post`, `fx-action`), its
+    arguments percent-encoded so that a value can neither add arguments nor
+    change others: `tool_url("item_remove", name="milk&role=admin")` carries
+    one `name`. The bridge decodes it back exactly (`URLSearchParams`).
+    Values travel as text, the way form fields do."""
+    if not isinstance(name, str) or not _NAME_RE.fullmatch(name):
+        raise ValueError(f"tool_url: {name!r} is not a tool name")
+    for k, v in args.items():
+        if isinstance(v, bool) or not isinstance(v, (str, int, float)):
+            raise TypeError(f"tool_url: {k}={v!r}; values travel as text, so pass a str or "
+                            f"a number")
+    query = urlencode({k: str(v) for k, v in args.items()}, quote_via=quote)
+    return f"tool:{name}?{query}" if query else f"tool:{name}"
 
 
 def _document(body, *, title, head, scripts, modules, styles, route, fetch, imports=None):
     """The widget page and the https origins it loads from."""
     body, head = _markup(body, "body"), _markup(head, "head")
+    if not issubclass(type(title), str):
+        raise TypeError("title must be a str")
+    title = str.__str__(title)           # plain text: a Markup title would be escaped twice
     if fetch not in ("hooks", "global"):
         raise ValueError("fetch must be 'hooks' (htmx, fixi) or 'global' (replace window.fetch)")
     if route is not None and (not isinstance(route, str) or not _NAME_RE.match(route)):
@@ -173,7 +214,7 @@ def _document(body, *, title, head, scripts, modules, styles, route, fetch, impo
             + "".join(tail) + "</body></html>"), origins
 
 
-def page(body: str | SupportsHTML, *, title: str = "", head: str | SupportsHTML = "",
+def page(body: HTMLLike, *, title: str = "", head: HTMLLike = "",
          scripts=(), modules=(), styles=(), imports: dict | None = None,
          route: str | None = None, fetch: str = "hooks") -> str:
     """A complete widget document around `body`: `styles`, `head`, the
@@ -215,10 +256,10 @@ class Widget:
     Per-user data belongs in tool results and fragments.
     """
 
-    def __init__(self, name: str, *, body: str | SupportsHTML | None = None,
-                 html: str | SupportsHTML | None = None,
+    def __init__(self, name: str, *, body: HTMLLike | None = None,
+                 html: HTMLLike | None = None,
                  title: str = "", scripts=(), modules=(), styles=(),
-                 head: str | SupportsHTML = "",
+                 head: HTMLLike = "",
                  imports: dict | None = None, route: str | None = None, fetch: str = "hooks",
                  csp: dict | None = None,
                  border: bool | None = None, uri: str | None = None):
@@ -339,7 +380,7 @@ def _context(context) -> dict:
     return json.loads(encoded)
 
 
-def fragment(html: str | SupportsHTML, *, status: int = 200,
+def fragment(html: HTMLLike, *, status: int = 200,
              content_type: str = "text/html; charset=utf-8", context=None) -> Result:
     """A tool result carrying an HTML fragment for the widget to swap in. A
     status of 400 or more marks the result `isError`; the bridge then reports
@@ -348,8 +389,10 @@ def fragment(html: str | SupportsHTML, *, status: int = 200,
 
     `html` is a str, or an object whose class defines `__html__` (the protocol
     Jinja and markupsafe use): FastHTML components, htpy elements,
-    `markupsafe.Markup`. Those escape the text you put in them; a str is used
-    as is, so escape everything you interpolate into one.
+    `markupsafe.Markup`. Those escape text and attribute values; a str is used
+    as is, so escape everything you interpolate into one. Escaping does not
+    protect a value that is parsed again: build `tool:` URLs with `tool_url()`
+    and `hx_vals` with `json.dumps()`, never by concatenating strings.
 
     `context` (a str, or `{"text": str, "data": dict}`) is what the model
     should know about the view after this action — "2 of 5 rows selected". The

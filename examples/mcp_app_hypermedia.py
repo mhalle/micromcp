@@ -87,14 +87,14 @@ class Todos:
 
 def plain_mcp():
     from micromcp import MCP
-    from micromcp.apps import fragment
+    from micromcp.apps import fragment, tool_url
 
     mcp, todos = MCP("hm-plain", "0.1.0"), Todos()
 
     def render():                      # components escape the text in them: no html.escape
         from fastcore.xml import Button, Div, Form, Input, Li, Span, Ul
         rows = [Li(Button("☑" if t["done"] else "☐", type="button",
-                          hx_post=f"tool:todo_toggle?id={t['id']}", **SWAP),
+                          hx_post=tool_url("todo_toggle", id=t["id"]), **SWAP),
                    " ", Span(t["text"]), cls="done" if t["done"] else None)
                 for t in todos.items]
         return Div(Ul(*rows),

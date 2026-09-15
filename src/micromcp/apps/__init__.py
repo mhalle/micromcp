@@ -9,6 +9,7 @@ package builds those pages and the server side they talk to:
     fragment()   an HTML fragment result for the widget to swap in, optionally
                  with model context
     page()       the bare document builder `Widget` uses
+    tool_url()   a `tool:` URL for hypermedia attributes, arguments encoded
     Channel      WebSocket-style messaging between open widgets and server code
     BRIDGE_JS    the widget-side client: MCP Apps handshake, `mcp.callTool`,
                  `mcp.fetch` (hypermedia over tool calls), model context,
@@ -31,13 +32,15 @@ from __future__ import annotations
 import pathlib
 
 from .channels import CHANNEL_IDLE, CHANNEL_QUEUE, CHANNEL_WAIT, Channel, Connection
-from .widget import BRIDGE_JS, CONTEXT_LIMIT, CONTEXT_META, FRAGMENT_META, Widget, fragment, page
+from .widget import (BRIDGE_JS, CONTEXT_LIMIT, CONTEXT_META, FRAGMENT_META, SupportsHTML,
+                     Widget, fragment, page, tool_url)
 
 
 DEVHOST_HTML = pathlib.Path(__file__).with_name("devhost.html").read_bytes()
 
 __all__ = [
-    "Widget", "fragment", "page", "Channel", "Connection", "BRIDGE_JS", "DEVHOST_HTML",
+    "Widget", "fragment", "page", "tool_url", "SupportsHTML",
+    "Channel", "Connection", "BRIDGE_JS", "DEVHOST_HTML",
     "CONTEXT_META", "FRAGMENT_META", "CONTEXT_LIMIT", "CHANNEL_WAIT", "CHANNEL_IDLE",
     "CHANNEL_QUEUE",
 ]
