@@ -29,6 +29,7 @@ SUITES = [
     ("test_progress.py", ["interop", "server"], 180),
     ("test_legacy.py", ["interop", "server"], 180),
     ("test_oauth.py", ["server"], 120),
+    ("test_oauth_sdk.py", ["interop", "server"], 180),
     ("harnesses.py", ["server"], 240),
     ("test_hardening.py", ["server", "interop"], 600),
     ("test_defender.py", ["server"], 300),

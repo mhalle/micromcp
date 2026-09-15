@@ -34,7 +34,8 @@
   `implies=` scope hierarchies; opaque tokens by introspection;
   `OAuth.static()` for development; `discover()` warnings for providers MCP
   clients cannot sign in with; and `metadata` for `resource_metadata=`.
-  Not in the single-file bundle. New suite `tests/test_oauth.py`.
+  Not in the single-file bundle. New suites `tests/test_oauth.py` and
+  `tests/test_oauth_sdk.py` (the official SDK client, end to end).
 - `Unauthorized.status` is derived from `error`, so it can no longer
   disagree with the challenge; an authentication error answered while
   preparing a 2025-era request names that era in `MCP-Protocol-Version`.
