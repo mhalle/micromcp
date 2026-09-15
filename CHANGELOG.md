@@ -25,13 +25,19 @@
   (`pip install "micromcp[oauth]"`, PyJWT 2.14+): discovery in the MCP
   clients' URL order with an exact issuer check; signature, issuer,
   audience, expiry, and not-before checks with asymmetric algorithms only;
-  cached keys with rate-limited refetches; `503` rather than `401` when the
-  provider is unreachable; `requires()` guards and `check()` for the `403`
-  step-up challenge, with `implies=` scope hierarchies; opaque tokens by
-  introspection; `OAuth.static()` for development; `discover()` warnings
-  for providers MCP clients cannot sign in with; and `metadata` for
-  `resource_metadata=`. Not in the single-file bundle. New suite
-  `tests/test_oauth.py`.
+  an async `authenticate`, so no request waits for a thread unless it needs
+  the provider, and fetches from the provider are single-flight and bounded
+  by `timeout`; keys refreshed in the background, unknown key ids forcing a
+  refresh at most every 30 s; `503` rather than `401` (or `500`) when the
+  provider is unreachable, slow, or answers something unusable;
+  `requires()` guards and `check()` for the `403` step-up challenge, with
+  `implies=` scope hierarchies; opaque tokens by introspection;
+  `OAuth.static()` for development; `discover()` warnings for providers MCP
+  clients cannot sign in with; and `metadata` for `resource_metadata=`.
+  Not in the single-file bundle. New suite `tests/test_oauth.py`.
+- `Unauthorized.status` is derived from `error`, so it can no longer
+  disagree with the challenge; an authentication error answered while
+  preparing a 2025-era request names that era in `MCP-Protocol-Version`.
 
 ### MCP Apps: `micromcp.apps` (experimental)
 - A subpackage imported only on request (`from micromcp.apps import ...`),

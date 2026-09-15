@@ -348,26 +348,43 @@ def todo_add(who: Principal, text: str) -> dict: ...
 On the first token it fetches the provider's metadata from the URLs MCP
 clients try, refusing a document whose `issuer` differs, then checks each
 JWT's signature against the provider's published keys, its issuer, its
-audience (`resource`, or `audience=`), and its expiry and not-before, with
-asymmetric algorithms only. Keys are cached, and tokens naming an unknown
-key refetch them at most every 30 seconds. The principal is `{"sub",
-"client_id", "scopes", "claims"}`. A missing or bad token is `401` with the
-challenge; an unreachable provider is `503`, so clients do not start a new
-sign-in for an outage. `auth.discover()` fetches the metadata at startup
-instead, and logs a warning for what would stop MCP clients from signing
-in: no PKCE `S256`, or neither Client ID Metadata Documents nor dynamic
-client registration.
+audience (`resource`, or `audience=`), and its expiry and not-before (with
+30 seconds of clock-skew `leeway=`), with asymmetric algorithms only. The
+principal is `{"sub", "client_id", "scopes", "claims"}`, a copy per request.
+A missing or bad token is `401` with the challenge. A provider that is
+unreachable, slower than `timeout=` (10 seconds), or answers something
+unusable (an empty key set included) is `503`, so clients do not start a new
+sign-in for an outage; after a failed discovery, requests answer `503` for
+10 seconds before it is tried again. `auth.discover()` fetches the metadata
+at startup instead, and logs a warning for what would stop MCP clients from
+signing in: no PKCE `S256`, or neither Client ID Metadata Documents nor
+dynamic client registration.
+
+`OAuth` is an async `authenticate`, awaited on the event loop: a request that
+needs nothing from the provider (no token, a cached key, a cached
+introspection answer) never waits for a thread, and fetches from the
+provider run one at a time per document on a few threads of their own. Keys
+are refreshed every five minutes in the background, the old ones in use
+meanwhile; a token naming an unknown key triggers a refresh at most every 30
+seconds.
 
 `auth.requires(...)` is a guard: a tool the token cannot use is left out of
 listings, and a direct call is `403 insufficient_scope` naming every scope
-the tool needs, which lets the client step up. `auth.check(who, ...)` does
-the same inside a handler, for a tool that should stay listed. `implies=`
-declares a scope hierarchy (`{"todos:admin": ["todos:write"]}`).
+the tool needs, which lets the client step up. Give one `requires()` all of
+a tool's scopes: guards stop at the first that fails. `auth.check(who, ...)`
+does the same inside a handler, for a tool that should stay listed; in a
+streaming (`Context`) tool the stream is already open, so a failed `check()`
+travels in-band without the `403`, and `requires()` is the one to use.
+`implies=` declares a scope hierarchy (`{"todos:admin": ["todos:write"]}`).
 `introspection=(client_id, secret)` validates opaque tokens at the
-provider's introspection endpoint instead; answers are reused for up to a
-minute and must name this server in `aud`. For development and tests,
+provider's introspection endpoint instead; answers must name this server in
+`aud` and are reused for up to a minute, so a token revoked at the provider
+keeps working that long. For development and tests,
 `OAuth.static({"dev-token": {"sub": "me", "scope": "todos:write"}})` stands in
-for a provider and yields the same principal.
+for a provider and yields the same principal. During an outage, an official
+SDK client connecting in its default mode may report a protocol-version
+error rather than the `503` (it retries with the 2025 handshake on any
+error); with `legacy="stateless"` it reports the outage.
 
 ## Mounting
 

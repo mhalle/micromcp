@@ -12,18 +12,27 @@ server: an identity provider such as Auth0, WorkOS, Keycloak, or Okta.
 
 The server stays a resource server: the provider signs users in and issues
 tokens; this module finds the provider's metadata and keys, checks each token,
-and answers with the challenges MCP clients act on. JWT signatures are checked
-with PyJWT (`pip install "micromcp[oauth]"`); discovery, introspection, and
-the rest use only the standard library.
+and answers with the challenges MCP clients act on.
+
+`OAuth` is an async `authenticate`, awaited on the server's event loop, so a
+request that needs nothing from the provider (no token, a cached key, a cached
+introspection answer) never waits for a thread. Fetches from the provider run
+on a few threads of their own, one at a time per document, and no caller waits
+for one longer than `timeout`. JWT signatures are checked with PyJWT
+(`pip install "micromcp[oauth]"`); the fetching uses only the standard library.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import concurrent.futures
+import copy
 import hashlib
-import inspect
 import json
 import math
+import os
+import re
 import threading
 import time
 import urllib.request
@@ -39,11 +48,14 @@ __all__ = ["OAuth", "ALGORITHMS"]
 # "sign" a token with that public material (algorithm confusion).
 ALGORITHMS = ("RS256", "RS384", "RS512", "PS256", "PS384", "PS512",
               "ES256", "ES384", "ES512", "EdDSA")
-MAX_DOCUMENT = 1024 * 1024    # bytes read from a metadata or introspection response
-RETRY_AFTER = 30.0            # seconds before a failed discovery is tried again
-KEY_COOLDOWN = 30.0           # seconds between key refetches forced by unknown key ids
+MAX_DOCUMENT = 1024 * 1024    # bytes read from any answer of the provider
+RETRY_AFTER = 10.0            # seconds a failed discovery answers 503 before it is retried
+KEYS_TTL = 300.0              # seconds before the keys are refreshed (in the background)
+KEY_COOLDOWN = 30.0           # seconds between key loads that unknown key ids may force
 INTROSPECTION_TTL = 60.0      # seconds an introspection answer is reused, at most
 INTROSPECTION_CACHE = 1024    # introspection answers kept
+FETCH_THREADS = 4             # threads fetching from the provider
+FETCH_BACKLOG = 64            # fetches that may wait for one; beyond that, 503 at once
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -54,6 +66,10 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 _OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+class _ProviderError(Exception):
+    """The provider could not be reached, was too slow, or answered something unusable."""
 
 
 def _unavailable():
@@ -85,18 +101,34 @@ def _metadata_urls(issuer):
             f"{base}{path}/.well-known/openid-configuration"]
 
 
-def _fetch(url, timeout, data=None, headers=None) -> dict:
-    """A JSON object from `url` (POSTing `data` when given). Raises OSError or
-    ValueError; the caller decides what an unreachable provider means."""
-    req = urllib.request.Request(url, data=data,
-                                 headers={"Accept": "application/json", **(headers or {})})
-    with _OPENER.open(req, timeout=timeout) as resp:
-        raw = resp.read(MAX_DOCUMENT + 1)
-    if len(raw) > MAX_DOCUMENT:
-        raise ValueError(f"response larger than {MAX_DOCUMENT} bytes")
-    doc = json.loads(raw)
+def _not_json(name):
+    raise ValueError(f"{name} is not a JSON number")
+
+
+def _fetch(url, deadline, data=None, headers=None) -> dict:
+    """A JSON object from `url` (POSTing `data` when given), read in full before
+    `deadline` (a time.monotonic() value), so a provider that trickles its
+    answer cannot hold a thread past it. Every failure is a _ProviderError."""
+    try:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("no time left")
+        req = urllib.request.Request(url, data=data,
+                                     headers={"Accept": "application/json", **(headers or {})})
+        chunks, size = [], 0
+        with _OPENER.open(req, timeout=remaining) as resp:
+            while chunk := resp.read1(65536):
+                size += len(chunk)
+                if size > MAX_DOCUMENT:
+                    raise ValueError(f"answer larger than {MAX_DOCUMENT} bytes")
+                if time.monotonic() > deadline:
+                    raise TimeoutError("answer too slow")
+                chunks.append(chunk)
+        doc = json.loads(b"".join(chunks), parse_constant=_not_json)
+    except Exception as e:     # socket, HTTP, protocol, JSON, and recursion errors alike
+        raise _ProviderError(f"{url}: {type(e).__name__}: {e}") from None
     if not isinstance(doc, dict):
-        raise ValueError("response is not a JSON object")
+        raise _ProviderError(f"{url}: not a JSON object")
     return doc
 
 
@@ -119,16 +151,15 @@ def _granted(claims) -> list:
 
 
 def _pyjwt():
-    """PyJWT with its crypto backend, recent enough to rate-limit key refetches."""
+    """PyJWT 2.14 or later (the 2.x security fixes), with its crypto backend."""
     try:
         import jwt
     except ImportError:
         raise ImportError('micromcp.contrib.oauth checks JWTs with PyJWT: '
                           'pip install "micromcp[oauth]"') from None
-    if "cooldown_duration" not in inspect.signature(jwt.PyJWKClient).parameters:
-        raise ImportError(f"micromcp.contrib.oauth needs PyJWT 2.14 or later (found "
-                          f"{jwt.__version__}): earlier ones refetch the provider's keys for "
-                          f"every unknown key id")
+    if tuple(int(n) for n in re.findall(r"\d+", jwt.__version__)[:2]) < (2, 14):
+        raise ImportError(f"micromcp.contrib.oauth needs PyJWT 2.14 or later "
+                          f"(found {jwt.__version__})")
     if not jwt.algorithms.has_crypto:
         raise ImportError('micromcp.contrib.oauth needs PyJWT\'s crypto backend: '
                           'pip install "micromcp[oauth]"')
@@ -136,9 +167,9 @@ def _pyjwt():
 
 
 class OAuth:
-    """The `authenticate` callback, and the protected-resource metadata, for a
-    server whose tokens a provider issues. Constructing one does no network
-    I/O: the provider's metadata is fetched on the first token (or by
+    """The async `authenticate` callback, and the protected-resource metadata,
+    for a server whose tokens a provider issues. Constructing one does no
+    network I/O: the provider's metadata is fetched on the first token (or by
     `discover()`).
 
     issuer         the provider's issuer identifier, exactly as its metadata
@@ -147,14 +178,14 @@ class OAuth:
     scopes         `scopes_supported`, and the scope a 401 asks for
     audience       the expected `aud` when the provider does not use `resource`
     algorithms     accepted JWT algorithms, a subset of ALGORITHMS
-    leeway         seconds of clock skew allowed on `exp` and `nbf`
+    leeway         seconds of clock skew allowed on `exp` and `nbf` (30)
     implies        a scope hierarchy: {"todos:admin": ["todos:write"]}
     introspection  (client_id, client_secret): validate opaque tokens at the
                    provider's introspection endpoint instead of as JWTs
-    timeout        seconds for each request to the provider
+    timeout        the most seconds a request waits for the provider (10)
 
-    The principal is `{"sub", "client_id", "scopes", "claims"}`, `scopes`
-    sorted and including the ones `implies` adds.
+    The principal is `{"sub", "client_id", "scopes", "claims"}` (a copy per
+    request), `scopes` sorted and including the ones `implies` adds.
     """
 
     def __init__(self, *, issuer: str, resource: str, scopes=(), audience=None,
@@ -162,6 +193,8 @@ class OAuth:
                  introspection=None, timeout: float = 10.0):
         self._setup(scopes, implies)
         self.issuer = _secure(issuer, "issuer")
+        if urlsplit(issuer).query or urlsplit(issuer).fragment:
+            raise ValueError(f"issuer {issuer!r} must have no query or fragment (RFC 8414)")
         u = urlsplit(resource) if isinstance(resource, str) else None
         if not u or u.scheme not in ("http", "https") or not u.netloc or u.query or u.fragment:
             raise ValueError(f"resource {resource!r} must be an absolute URL without query or "
@@ -171,7 +204,7 @@ class OAuth:
         self.audiences = (aud,) if isinstance(aud, str) else tuple(aud)
         if not self.audiences or not all(isinstance(a, str) and a for a in self.audiences):
             raise ValueError("audience must be a non-empty str or a list of them")
-        self.algorithms = tuple(algorithms)
+        self.algorithms = (algorithms,) if isinstance(algorithms, str) else tuple(algorithms)
         bad = [a for a in self.algorithms if a not in ALGORITHMS]
         if bad or not self.algorithms:
             raise ValueError(f"algorithms {bad!r}: only asymmetric JWT algorithms are accepted "
@@ -206,14 +239,19 @@ class OAuth:
         return self
 
     def _setup(self, scopes, implies):
-        self.scopes = _words(scopes, "scopes")
+        self.scopes = _words(scopes or (), "scopes")
         if "offline_access" in self.scopes:
             raise ValueError("scopes: offline_access asks for refresh tokens, which are the "
                              "client's business, not a requirement of this server")
+        if implies is not None and not isinstance(implies, dict):
+            raise ValueError("implies must map a scope to the scopes it implies")
         self._implies = {_words(broad, "implies")[0]: _words(narrower, "implies")
                          for broad, narrower in (implies or {}).items()}
+        self._pid = os.getpid()
         self._lock = threading.Lock()
-        self._as = self._keys = self._failed_at = None
+        self._flights, self._pending, self._executor = {}, 0, None
+        self._as = self._keys = self._failed_at = self._key_try = None
+        self._complained = {}
         self._cache = OrderedDict()
 
     @property
@@ -229,10 +267,10 @@ class OAuth:
 
     # ── authenticate ───────────────────────────────────────────────────────
 
-    def __call__(self, headers) -> dict:
+    async def __call__(self, headers) -> dict:
         """`authenticate`: the principal for a valid bearer token; `Unauthorized`
-        (401) for a missing or invalid one; `Error` 503 when the provider
-        cannot be reached."""
+        (401) for a missing or invalid one; `Error` 503 when the provider is
+        unreachable, too slow, or answers something unusable."""
         scheme, _, token = headers.get("authorization", "").strip().partition(" ")
         token = token.strip()
         if scheme.lower() != "bearer" or not token:
@@ -242,12 +280,13 @@ class OAuth:
             if claims is None:
                 raise Unauthorized.invalid()
         elif self.introspection is not None:
-            claims = self._introspect(token)
+            claims = await self._introspect(token)
         else:
-            claims = self._verify(token)
+            claims = await self._verify(token)
         return self._principal(claims)
 
     def _principal(self, claims) -> dict:
+        claims = copy.deepcopy(claims)       # a handler must not change the next request's
         scopes, todo = set(), _granted(claims)
         while todo:
             s = todo.pop()
@@ -257,107 +296,141 @@ class OAuth:
         return {"sub": claims.get("sub"), "client_id": claims.get("client_id", claims.get("azp")),
                 "scopes": sorted(scopes), "claims": claims}
 
-    def _verify(self, token) -> dict:
+    async def _verify(self, token) -> dict:
         jwt = self._jwt
-        if self._keys is None:
-            keys = jwt.PyJWKClient(self._endpoint("jwks_uri"), cache_jwk_set=True, lifespan=300,
-                                   timeout=self.timeout, cooldown_duration=KEY_COOLDOWN)
-            with self._lock:
-                self._keys = self._keys or keys
         try:
-            key = self._keys.get_signing_key_from_jwt(token)
+            kid = jwt.get_unverified_header(token).get("kid")
+        except Exception:                    # never a 500 for bytes a caller chose
+            raise Unauthorized.invalid() from None
+        key = await self._signing_key(kid)
+        try:
             return jwt.decode(token, key, algorithms=list(self.algorithms),
                               audience=list(self.audiences), issuer=self.issuer,
                               leeway=self.leeway, options={"require": ["exp", "iss", "aud"]})
-        except jwt.exceptions.PyJWKClientConnectionError as e:
-            log.error("OAuth: cannot fetch the signing keys of %s: %s", self.issuer, e)
-            raise _unavailable() from None
         except jwt.exceptions.PyJWTError:
             raise Unauthorized.invalid() from None
+        except Exception:
+            log.exception("OAuth: unexpected error while checking a token; refusing it")
+            raise Unauthorized.invalid() from None
 
-    def _introspect(self, token) -> dict:
-        key = hashlib.sha256(token.encode()).hexdigest()
-        now = time.time()
+    # ── fetches from the provider ──────────────────────────────────────────
+
+    def _start(self, key, fn):
+        """A future for `fn()` on a fetch thread, shared with every caller that
+        asks for `key` while it runs."""
+        if self._pid != os.getpid():         # forked: the threads and the lock stayed behind
+            self._pid, self._lock = os.getpid(), threading.Lock()
+            self._flights, self._pending, self._executor = {}, 0, None
         with self._lock:
-            hit = self._cache.get(key)
-            if hit is not None and hit[1] > now:
-                return hit[0]
-            self._cache.pop(key, None)
-        url = self._endpoint("introspection_endpoint")
-        client_id, secret = self.introspection
-        basic = base64.b64encode(f"{quote_plus(client_id)}:{quote_plus(secret)}".encode()).decode()
+            fut = self._flights.get(key)
+            if fut is not None:
+                return fut
+            if self._pending >= FETCH_BACKLOG:
+                raise _ProviderError("too many fetches from the provider are waiting")
+            if self._executor is None:
+                self._executor = concurrent.futures.ThreadPoolExecutor(
+                    FETCH_THREADS, thread_name_prefix="micromcp-oauth")
+            try:
+                fut = self._executor.submit(fn)
+            except RuntimeError as e:        # the interpreter is shutting down
+                raise _ProviderError(str(e)) from None
+            self._flights[key] = fut
+            self._pending += 1
+        fut.add_done_callback(lambda f: self._landed(key, f))
+        return fut
+
+    def _landed(self, key, fut):
+        with self._lock:
+            self._pending -= 1
+            if self._flights.get(key) is fut:
+                del self._flights[key]
+
+    async def _fetched(self, key, fn):
+        """`fn()` on a fetch thread (shared, see `_start`), waited for at most
+        `timeout` seconds. Every failure is a _ProviderError."""
+        inner = asyncio.wrap_future(self._start(key, fn))
         try:
-            info = _fetch(url, self.timeout,
-                          data=urlencode({"token": token,
-                                          "token_type_hint": "access_token"}).encode(),
-                          headers={"Authorization": f"Basic {basic}",
-                                   "Content-Type": "application/x-www-form-urlencoded"})
-        except (OSError, ValueError) as e:
-            log.error("OAuth: introspection at %s failed: %s", url, e)
-            raise _unavailable() from None
-        claims = self._introspected(info, now)
-        exp = claims.get("exp")
-        until = now + min(INTROSPECTION_TTL, exp - now if exp is not None else INTROSPECTION_TTL)
+            return await asyncio.wait_for(asyncio.shield(inner), self.timeout)
+        except TimeoutError:
+            # The fetch goes on for whoever else waits; if it fails later, its
+            # error is read here, not reported as "never retrieved".
+            inner.add_done_callback(lambda f: f.cancelled() or f.exception())
+            raise _ProviderError(f"no answer within {self.timeout} s") from None
+
+    def _complain(self, what, detail):
+        """Log a provider failure, once per RETRY_AFTER per kind: an outage would
+        otherwise log once per request."""
+        now = time.monotonic()
         with self._lock:
-            self._cache[key] = (claims, until)
-            while len(self._cache) > INTROSPECTION_CACHE:
-                self._cache.popitem(last=False)
-        return claims
+            last = self._complained.get(what)
+            if last is not None and now - last < RETRY_AFTER:
+                return
+            self._complained[what] = now
+        log.error("OAuth: %s: %s", what, detail)
 
-    def _introspected(self, info, now) -> dict:
-        """An introspection answer, accepted only when it is active, in date,
-        from our provider, and names this server in `aud` (RFC 8707: a token
-        for another service must not work here, and without `aud` we cannot
-        tell)."""
-        def when(k):
-            v = info.get(k)
-            return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
-        aud = info.get("aud")
-        auds = {aud} if isinstance(aud, str) else \
-            {a for a in aud if isinstance(a, str)} if isinstance(aud, list) else set()
-        exp, nbf = when("exp"), when("nbf")
-        if info.get("active") is not True \
-                or ("exp" in info and (exp is None or exp + self.leeway < now)) \
-                or ("nbf" in info and (nbf is None or nbf - self.leeway > now)) \
-                or ("iss" in info and info["iss"] != self.issuer) \
-                or not auds & set(self.audiences):
-            raise Unauthorized.invalid()
-        return info
+    # ── the provider's metadata ────────────────────────────────────────────
 
-    # ── the provider ───────────────────────────────────────────────────────
+    def _discover_now(self) -> dict:
+        """Fetch and check the metadata, within one `timeout` for all the URLs.
+        The document must name our issuer and carry the endpoint this mode
+        needs; otherwise it is not used (and not cached)."""
+        deadline = time.monotonic() + self.timeout
+        need = "introspection_endpoint" if self.introspection else "jwks_uri"
+        problems = []
+        for url in _metadata_urls(self.issuer):
+            try:
+                doc = _fetch(url, deadline)
+            except _ProviderError as e:
+                problems.append(str(e))
+                continue
+            if doc.get("issuer") != self.issuer:      # RFC 8414 §3.3: must not be used
+                problems.append(f"{url} names issuer {doc.get('issuer')!r}, "
+                                f"not {self.issuer!r}")
+                continue
+            try:
+                _secure(doc.get(need), need)
+            except ValueError as e:
+                problems.append(f"{url}: {e}")
+                continue
+            return doc
+        raise _ProviderError("; ".join(problems))
+
+    def _found(self, doc) -> dict:
+        with self._lock:
+            first, self._as, self._failed_at = self._as is None, doc, None
+        if first:
+            self._warn(doc)
+        return doc
+
+    def _lost(self, e):
+        with self._lock:
+            self._failed_at = time.monotonic()
+        self._complain(f"no usable metadata for issuer {self.issuer}", e)
+        return _unavailable()
+
+    async def _metadata(self) -> dict:
+        if self._as is not None:
+            return self._as
+        if self._failed_at is not None and time.monotonic() - self._failed_at < RETRY_AFTER:
+            raise _unavailable()
+        try:
+            return self._found(await self._fetched("metadata", self._discover_now))
+        except _ProviderError as e:
+            raise self._lost(e) from None
 
     def discover(self) -> dict:
-        """The provider's metadata, fetched now if it has not been (otherwise it
-        is fetched on the first token), with a warning logged for anything that
-        would stop MCP clients from signing in. Raises `Error` 503 when there is
-        no usable metadata; a failure is retried after RETRY_AFTER seconds."""
+        """The provider's metadata, fetched now (blocking) if it has not been; it
+        is otherwise fetched on the first token. Logs a warning for anything
+        that would stop MCP clients from signing in. Raises `Error` 503 when
+        there is no usable metadata."""
         if self._tokens is not None:
             raise RuntimeError("OAuth.static() has no provider to discover")
-        with self._lock:
-            if self._as is not None:
-                return self._as
-            if self._failed_at is not None and time.monotonic() - self._failed_at < RETRY_AFTER:
-                raise _unavailable()
-            problems = []
-            for url in _metadata_urls(self.issuer):
-                try:
-                    doc = _fetch(url, self.timeout)
-                except (OSError, ValueError) as e:
-                    problems.append(f"{url}: {e}")
-                    continue
-                if doc.get("issuer") != self.issuer:      # RFC 8414 §3.3: must not be used
-                    problems.append(f"{url} names issuer {doc.get('issuer')!r}, "
-                                    f"not {self.issuer!r}")
-                    continue
-                self._as = doc
-                break
-            else:
-                self._failed_at = time.monotonic()
-                log.error("OAuth: no usable metadata for issuer %s: %s", self.issuer,
-                          "; ".join(problems))
-                raise _unavailable()
-        self._warn(self._as)
-        return self._as
+        if self._as is not None:
+            return self._as
+        try:
+            return self._found(self._discover_now())
+        except _ProviderError as e:
+            raise self._lost(e) from None
 
     def _warn(self, doc):
         methods = doc.get("code_challenge_methods_supported")
@@ -371,13 +444,132 @@ class OAuth:
                         "client registration; each MCP client must be registered with it by "
                         "hand", self.issuer)
 
-    def _endpoint(self, name):
-        url = self.discover().get(name)
+    # ── signing keys ───────────────────────────────────────────────────────
+
+    def _load_keys(self) -> dict:
+        """Fetch the key set and keep the keys usable with `algorithms`, by id.
+        An empty or unusable set is the provider's fault, not the token's."""
+        uri = self._as["jwks_uri"]
+        doc = _fetch(uri, time.monotonic() + self.timeout)
         try:
-            return _secure(url, name)
-        except ValueError as e:
-            log.error("OAuth: the metadata of %s: %s", self.issuer, e)
+            found = self._jwt.PyJWKSet.from_dict(doc).keys
+        except Exception as e:               # PyJWKSetError, malformed entries
+            raise _ProviderError(f"{uri}: {type(e).__name__}: {e}") from None
+        keys = {k.key_id: k for k in found if k.algorithm_name in self.algorithms}
+        if not keys:
+            raise _ProviderError(f"{uri}: no signing key for {', '.join(self.algorithms)}")
+        self._keys = (keys, time.monotonic())
+        return keys
+
+    @staticmethod
+    def _pick(keys, kid):
+        if kid is None and len(keys) == 1:
+            return next(iter(keys.values()))
+        return keys.get(kid) if kid is None or isinstance(kid, str) else None
+
+    def _may_load(self, gap) -> bool:
+        """Claim the next key load, unless one was tried within `gap` seconds."""
+        now = time.monotonic()
+        with self._lock:
+            if self._key_try is not None and now - self._key_try < gap:
+                return False
+            self._key_try = now
+            return True
+
+    async def _signing_key(self, kid):
+        """The key for `kid`. Keys due for a refresh are still used while one
+        refresh runs in the background. An unknown kid may force a load at most
+        every KEY_COOLDOWN seconds, or joins the one already running."""
+        await self._metadata()
+        keys, loaded = self._keys or ({}, None)
+        key = self._pick(keys, kid)
+        if key is not None:
+            if time.monotonic() - loaded > KEYS_TTL and self._may_load(KEY_COOLDOWN):
+                self._load_in_background()
+            return key
+        with self._lock:
+            running = "keys" in self._flights
+        if not running and not self._may_load(KEY_COOLDOWN if keys else RETRY_AFTER):
+            if keys:
+                raise Unauthorized.invalid()     # an unknown key id; the keys are recent
+            raise _unavailable()                 # still no keys since the last failed load
+        try:
+            keys = await self._fetched("keys", self._load_keys)
+        except _ProviderError as e:
+            self._complain(f"cannot load the signing keys of {self.issuer}", e)
             raise _unavailable() from None
+        key = self._pick(keys, kid)
+        if key is None:
+            raise Unauthorized.invalid()
+        return key
+
+    def _load_in_background(self):
+        try:
+            fut = self._start("keys", self._load_keys)
+        except _ProviderError:
+            return
+
+        def landed(f):
+            if f.exception() is not None:
+                self._complain(f"cannot refresh the signing keys of {self.issuer}",
+                               f.exception())
+        fut.add_done_callback(landed)
+
+    # ── introspection ──────────────────────────────────────────────────────
+
+    def _ask(self, token) -> dict:
+        """Ask the introspection endpoint about `token`."""
+        url = self._as["introspection_endpoint"]
+        client_id, secret = self.introspection
+        basic = base64.b64encode(f"{quote_plus(client_id)}:{quote_plus(secret)}".encode()).decode()
+        return _fetch(url, time.monotonic() + self.timeout,
+                      data=urlencode({"token": token, "token_type_hint": "access_token"}).encode(),
+                      headers={"Authorization": f"Basic {basic}",
+                               "Content-Type": "application/x-www-form-urlencoded"})
+
+    async def _introspect(self, token) -> dict:
+        key = hashlib.sha256(token.encode()).hexdigest()
+        with self._lock:
+            hit = self._cache.get(key)
+        if hit is not None and hit[1] > time.time():
+            return hit[0]
+        await self._metadata()
+        try:
+            info = await self._fetched(("introspect", key), lambda: self._ask(token))
+        except _ProviderError as e:
+            self._complain(f"introspection at {self.issuer} failed", e)
+            raise _unavailable() from None
+        now = time.time()
+        claims = self._introspected(info, now)
+        exp = claims.get("exp")
+        until = now + min(INTROSPECTION_TTL, exp - now if exp is not None else INTROSPECTION_TTL)
+        with self._lock:
+            self._cache[key] = (claims, until)
+            self._cache.move_to_end(key)
+            while len(self._cache) > INTROSPECTION_CACHE:
+                self._cache.popitem(last=False)
+        return claims
+
+    def _introspected(self, info, now) -> dict:
+        """An introspection answer, accepted only when it is active, in date
+        (finite `exp`/`nbf`), from our provider, and names this server in
+        `aud` (RFC 8707: a token for another service must not work here, and
+        without `aud` we cannot tell)."""
+        def when(k):
+            v = info.get(k)
+            ok = isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+            return v if ok else None
+        aud = info.get("aud")
+        auds = {aud} if isinstance(aud, str) else \
+            {a for a in aud if isinstance(a, str)} if isinstance(aud, list) else set()
+        exp, nbf = when("exp"), when("nbf")
+        if info.get("active") is not True \
+                or ("exp" in info and (exp is None or exp + self.leeway < now)) \
+                or ("nbf" in info and (nbf is None or nbf - self.leeway > now)) \
+                or ("iss" in info and info["iss"] != self.issuer) \
+                or not auds & set(self.audiences):
+            raise Unauthorized.invalid()
+        return info
 
     # ── scopes ─────────────────────────────────────────────────────────────
 
@@ -385,7 +577,9 @@ class OAuth:
         """A guard: the token must carry every one of `scopes` (a broader scope
         that `implies` one counts). Without them the tool is left out of
         listings, and a direct call answers 403 `insufficient_scope` naming all
-        of them, which lets the client step up its authorization."""
+        of them, which lets the client step up its authorization. Give one
+        `requires()` all of a tool's scopes: guards stop at the first that
+        fails, so a second would go unnamed."""
         need = _words(scopes, "requires")
 
         def guard(principal):
@@ -396,7 +590,9 @@ class OAuth:
     def check(self, principal, *scopes):
         """The same test inside a handler, for a tool that stays listed: raises
         `Unauthorized` 403 `insufficient_scope` naming every one of `scopes`.
-        Call it before a streaming tool's first notification."""
+        In a streaming (`Context`) tool the stream is open before the handler
+        runs, so the failure can only travel in-band, without the 403 a client
+        steps up on: guard streaming tools with `requires()` instead."""
         self._require(principal, _words(scopes, "check"))
 
     def _require(self, principal, need):
