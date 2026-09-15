@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Requests carrying `NaN`, `Infinity`, or a number that overflows to
+  infinity are refused as parse errors (`400`/`-32700`). JSON has no such
+  values, but Python's parser accepts them, so they used to reach handlers
+  (a `NaN` timeout never expires; a `NaN` comparison is always false).
+
 ## 0.1.0 — 2026-09-14 (tagged; not yet on PyPI)
 
 First packaged release. Same public API as the original single file:

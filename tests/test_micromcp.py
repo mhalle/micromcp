@@ -145,6 +145,27 @@ for legacy in ("initialize", "ping", "notifications/initialized"):
 check("refusal advertises our version",
       post("initialize")[1]["error"]["data"]["supported"], ["2026-07-28"])
 
+# JSON has no NaN or Infinity, but Python's parser accepts them; a handler must
+# never see them (a NaN timeout never expires, a NaN comparison is always false).
+for label, v in [("NaN", float("nan")), ("Infinity", float("inf")), ("-Infinity", float("-inf"))]:
+    s, r = post("tools/call", {"name": "severity_breakdown", "arguments": {"limit": v}})
+    check(f"{label} in a request -> 400/-32700", (s, r["error"]["code"]), (400, -32700))
+raw = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                  "params": {"name": "severity_breakdown", "arguments": {"limit": 7},
+                             "_meta": {META_VER: PROTOCOL, META_CAPS: {}}}}).replace(": 7", ": 1e400")
+req = urllib.request.Request(f"http://127.0.0.1:{PORT}/mcp", data=raw.encode(), method="POST",
+                             headers={"Content-Type": "application/json",
+                                      "Accept": "application/json, text/event-stream",
+                                      "MCP-Protocol-Version": PROTOCOL, "Mcp-Method": "tools/call",
+                                      "Mcp-Name": "severity_breakdown"})
+try:
+    urllib.request.urlopen(req); code = 200
+except urllib.error.HTTPError as e:
+    code = (e.code, json.loads(e.read())["error"]["code"])
+check("a number that overflows to infinity -> 400/-32700", code, (400, -32700))
+s, r = post("tools/call", {"name": "severity_breakdown", "arguments": {"limit": 3}})
+check("finite numbers are unaffected", s, 200)
+
 req = urllib.request.Request(f"http://127.0.0.1:{PORT}/mcp", method="GET")
 try:
     urllib.request.urlopen(req); code = 200
