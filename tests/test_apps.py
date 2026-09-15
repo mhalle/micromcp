@@ -100,6 +100,56 @@ check("tools/call carries the context", res["_meta"][CONTEXT_META],
       {"text": "one", "data": {"n": 1}})
 check("tools/call keeps the server stamp", META_SERVER in res["_meta"], True)
 
+# ── markup objects (__html__) ──────────────────────────────────────────────
+print("markup objects")
+
+
+class Html:                       # the markupsafe protocol, as FastHTML and htpy implement it
+    def __init__(self, s):
+        self.s = s
+
+    def __html__(self):
+        return self.s
+
+
+class Marked(str):                # like markupsafe.Markup: escapes whatever is added to it
+    def __html__(self):
+        return self
+
+    def __radd__(self, other):
+        return Marked(other.replace("<", "&lt;") + str(self))
+
+
+class Anything:                   # answers every attribute, __html__ included
+    def __getattr__(self, name):
+        return lambda: "<p>not markup</p>"
+
+
+class Bytes:
+    def __html__(self):
+        return b"<p>bytes</p>"
+
+
+f = fragment(Html("<p>hi</p>"))
+check("fragment renders an __html__ object", f["content"],
+      [{"type": "text", "text": "<p>hi</p>"}])
+check("fragment text is an exact str", type(fragment(Marked("<i>"))["content"][0]["text"]), str)
+for label, bad in [("an int", 5), ("__html__ from __getattr__", Anything()),
+                   ("__html__ returning bytes", Bytes())]:
+    check(f"fragment refuses {label}", raises(lambda b=bad: fragment(b), TypeError), "TypeError")
+doc = page(Html('<div id="app"></div>'), head=Html('<meta name="x">'))
+check("page renders body and head objects",
+      ('<meta name="x">' in doc, '<div id="app"></div>' in doc), (True, True))
+doc = page(Marked("<p>m</p>"))
+check("a Markup-like body does not escape the page around it",
+      ("<head><meta charset" in doc, "<p>m</p>" in doc), (True, True))
+check("Widget(body=) renders an object", "<b>w</b>" in Widget("mk1", body=Html("<b>w</b>")).html,
+      True)
+check("Widget(html=) uses an object verbatim",
+      Widget("mk2", html=Html("<!doctype html><p>v</p>")).html, "<!doctype html><p>v</p>")
+check("Widget(body=) refuses an int", raises(lambda: Widget("mk3", body=5), TypeError),
+      "TypeError")
+
 # ── widget pages ───────────────────────────────────────────────────────────
 print("pages")
 doc = page("<p>x</p>", title="A & B", head="<style></style>", scripts=["var mine = 1;"])

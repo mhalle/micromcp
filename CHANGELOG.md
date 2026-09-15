@@ -36,6 +36,12 @@
   `mcp.fetch`, a `fetch()`-shaped tool-call transport wired into htmx 4 and
   fixi); `fragment(html, status=, context=)` returns HTML for the widget to
   swap in. The bridge ships as `bridge.js` in the package.
+- HTML arguments (`fragment()`, `page()`, and `Widget`'s `body=`, `head=`,
+  `html=`) take a str or any object whose class defines `__html__`, the
+  markupsafe protocol: FastHTML components, htpy elements, `markupsafe.Markup`.
+  Those escape the text put in them, so a widget needs no hand-escaped
+  f-strings. Output is normalized to an exact str, so a `Markup` body no
+  longer escapes the page built around it.
 - Model context: `fragment(context=)` and `mcp.setContext()` send
   `ui/update-model-context` (text plus data as a labeled JSON block);
   `mcp.say()` and `data-mcp-say` send `ui/message`.
@@ -61,10 +67,10 @@
   not plain origins. `django_routes` refuses control characters and invalid
   UTF-8 in paths. The README warns against swapping user-authored HTML into a
   widget.
-- Examples: `mcp_app_3d.py` (a shared three.js scene the
-  model builds and the user selects in), `mcp_app_hypermedia.py` (todo widget
-  with tools and with Django views), `toolkit_lab.py` (nine self-testing
-  toolkit variants and a model-context counter). Suite
+- Examples: `mcp_app_3d.py` (a shared three.js scene the model builds and
+  the user selects in), `mcp_app_hypermedia.py` (todo widget rendered with
+  FastHTML components by tools, and by Django views), `toolkit_lab.py` (nine
+  self-testing toolkit variants and a model-context counter). Suite
   `tests/test_apps.py`.
 
 ## 0.1.0 — 2026-09-14 (tagged; not yet on PyPI)

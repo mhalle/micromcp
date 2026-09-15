@@ -5,11 +5,11 @@ A `Widget` is a static page the host renders in a sandboxed iframe, and
 htmx requests travel as host-proxied `tools/call`, and each app-only tool
 answers with an HTML `fragment`, which also tells the model what changed.
 
-    /mcp          app-only tools render the fragments (html.escape)
+    /mcp          app-only tools render the fragments with FastHTML components (fastcore)
     /django/mcp   Django views and templates render them, through `django_routes`
     /lab/mcp      the toolkit lab (toolkit_lab.py); /ctx/mcp, its model-context counter
 
-Locally (needs uvicorn and django):
+Locally (needs uvicorn, django, and fastcore):
 
     python examples/mcp_app_hypermedia.py
     open http://127.0.0.1:8770/devhost?mcp=/mcp        # or /django/mcp, /lab/mcp, /ctx/mcp
@@ -18,7 +18,6 @@ On Modal (each path is its own custom connector in Claude's settings):
 
     modal deploy examples/mcp_app_hypermedia.py
 """
-import html
 import os
 import pathlib
 import threading
@@ -36,16 +35,17 @@ li{margin:2px 0}li.done span{text-decoration:line-through;opacity:.6}
 button{font:inherit;cursor:pointer}form{display:flex;gap:6px;margin:6px 0}
 input{flex:1;font:inherit}small{display:block;margin-top:8px;opacity:.7}
 """
-SWAP = 'hx-target="#app" hx-swap="innerMorph"'
+SWAP = {"hx_target": "#app", "hx_swap": "innerMorph"}   # component keywords: hx_swap -> hx-swap
 
 
-def todo_widget(title: str, load: str, route: str | None = None):
+def todo_widget(title: str, load: dict, route: str | None = None):
     """The same page for both servers; `load` is the htmx attribute that fetches the list."""
+    from fastcore.xml import H1, Div, Em, Main, Small
     from micromcp.apps import Widget
     return Widget("todos", title=title, styles=CSS, scripts=[HTMX], route=route, border=True,
-                  body=(f"<h1>{html.escape(title)}</h1>"
-                        f'<div id="app" {load} hx-trigger="mcp:ready" {SWAP}>'
-                        f"<em>connecting&hellip;</em></div><small data-mcp-status></small>"))
+                  body=Main(H1(title),
+                            Div(Em("connecting…"), id="app", hx_trigger="mcp:ready", **load, **SWAP),
+                            Small(data_mcp_status=True)))
 
 
 class Todos:
@@ -91,18 +91,18 @@ def plain_mcp():
 
     mcp, todos = MCP("hm-plain", "0.1.0"), Todos()
 
-    def render():
-        rows = "".join(
-            f'<li class="{"done" if t["done"] else ""}"><button type="button" '
-            f'hx-post="tool:todo_toggle?id={t["id"]}" {SWAP}>'
-            f'{"&#9745;" if t["done"] else "&#9744;"}</button> '
-            f'<span>{html.escape(t["text"])}</span></li>' for t in todos.items)
-        return (f"<ul>{rows}</ul>"
-                f'<form><input name="text" placeholder="New todo" autocomplete="off">'
-                f'<button type="button" hx-post="tool:todo_add" {SWAP}>Add</button></form>'
-                f'<button type="button" hx-post="tool:todo_clear" {SWAP}>Clear done</button>')
+    def render():                      # components escape the text in them: no html.escape
+        from fastcore.xml import Button, Div, Form, Input, Li, Span, Ul
+        rows = [Li(Button("☑" if t["done"] else "☐", type="button",
+                          hx_post=f"tool:todo_toggle?id={t['id']}", **SWAP),
+                   " ", Span(t["text"]), cls="done" if t["done"] else None)
+                for t in todos.items]
+        return Div(Ul(*rows),
+                   Form(Input(name="text", placeholder="New todo", autocomplete="off"),
+                        Button("Add", type="button", hx_post="tool:todo_add", **SWAP)),
+                   Button("Clear done", type="button", hx_post="tool:todo_clear", **SWAP))
 
-    @todo_widget("Todos", 'hx-post="tool:todo_list"').tool(
+    @todo_widget("Todos", {"hx_post": "tool:todo_list"}).tool(
         mcp, title="Show todos", read_only=True)
     def show_todos() -> str:
         """Show the interactive todo list to the user."""
@@ -172,7 +172,7 @@ def django_asgi():
     mcp, todos = MCP("hm-django", "0.1.0"), Todos()
     route = django_routes(mcp, prefixes=["/django/ui/"], host="localhost")
 
-    @todo_widget("Todos (Django)", 'hx-get="/django/ui/todos/"', route=route).tool(
+    @todo_widget("Todos (Django)", {"hx_get": "/django/ui/todos/"}, route=route).tool(
         mcp, title="Show todos", read_only=True)
     def show_todos() -> str:
         """Show the interactive todo list to the user."""
@@ -265,7 +265,7 @@ except ImportError:
 
 if modal is not None:
     image = (modal.Image.debian_slim(python_version="3.12")
-             .pip_install("django>=5.2")
+             .pip_install("django>=5.2", "fastcore")
              .env({"PYTHONPATH": "/root/src", "WIRE_LOG": "1"})
              .add_local_dir(HERE.parent / "src", "/root/src")
              .add_local_dir(HERE / "vendor", "/root/vendor")

@@ -31,6 +31,7 @@ import os
 import pathlib
 import re
 import weakref
+from typing import Protocol
 from urllib.parse import urlsplit
 
 from micromcp import Result, result
@@ -98,10 +99,33 @@ def _script(source, module=False):
     return f"<script{kind}>{source}</script>"
 
 
+class SupportsHTML(Protocol):
+    """Anything that renders itself as HTML (the markupsafe protocol):
+    FastHTML's components, htpy elements, `markupsafe.Markup`."""
+
+    def __html__(self) -> str: ...
+
+
+def _markup(value, what) -> str:
+    """HTML from a str, or from an object whose class defines `__html__`. Such
+    an object vouches that its output is escaped, so it is used as rendered.
+    The method must be on the class, where Python looks for special methods,
+    so a `__getattr__` that answers every name does not make an object
+    markup. The result is an exact str: a subclass such as `Markup` escapes
+    whatever is concatenated with it, which would escape the page around it."""
+    if not isinstance(value, str):
+        if not hasattr(type(value), "__html__"):
+            raise TypeError(f"{what} must be a str or an object with __html__ (FastHTML "
+                            f"components, htpy, markupsafe.Markup), not {type(value).__name__}")
+        value = value.__html__()
+        if not isinstance(value, str):
+            raise TypeError(f"{what}: __html__() returned {type(value).__name__}, not str")
+    return str.__str__(value)
+
+
 def _document(body, *, title, head, scripts, modules, styles, route, fetch, imports=None):
     """The widget page and the https origins it loads from."""
-    if not isinstance(body, str):
-        raise TypeError("body must be a str")
+    body, head = _markup(body, "body"), _markup(head, "head")
     if fetch not in ("hooks", "global"):
         raise ValueError("fetch must be 'hooks' (htmx, fixi) or 'global' (replace window.fetch)")
     if route is not None and (not isinstance(route, str) or not _NAME_RE.match(route)):
@@ -149,8 +173,9 @@ def _document(body, *, title, head, scripts, modules, styles, route, fetch, impo
             + "".join(tail) + "</body></html>"), origins
 
 
-def page(body: str, *, title: str = "", head: str = "", scripts=(), modules=(), styles=(),
-         imports: dict | None = None, route: str | None = None, fetch: str = "hooks") -> str:
+def page(body: str | SupportsHTML, *, title: str = "", head: str | SupportsHTML = "",
+         scripts=(), modules=(), styles=(), imports: dict | None = None,
+         route: str | None = None, fetch: str = "hooks") -> str:
     """A complete widget document around `body`: `styles`, `head`, the
     `imports` map and `BRIDGE_JS` in the head, then `body`, then `scripts` and
     `modules` in order, so a script can reach the page's elements. Each
@@ -159,7 +184,8 @@ def page(body: str, *, title: str = "", head: str = "", scripts=(), modules=(), 
     `imports` maps module specifiers to https URLs (`{"three": ".../three.module.js"}`)
     so modules can `import ... from "three"`. `route` names the tool that
     serves non-`tool:` URLs; `fetch="global"` lets libraries without a hook
-    (Datastar) reach tools through `window.fetch`. Most code wants `Widget`."""
+    (Datastar) reach tools through `window.fetch`. `body` and `head` are a
+    str or an object with `__html__`, as for `fragment`. Most code wants `Widget`."""
     return _document(body, title=title, head=head, scripts=scripts, modules=modules,
                      styles=styles, route=route, fetch=fetch, imports=imports)[0]
 
@@ -181,13 +207,18 @@ class Widget:
              frameDomains, baseUriDomains
     border   `_meta.ui.prefersBorder`
 
+    `body`, `head`, and `html` are a str or an object with `__html__`
+    (FastHTML components, htpy, `markupsafe.Markup`), rendered once, here.
+
     Widgets are static: hosts fetch them under their own identity and cache
     them per connector, so a changed page needs a new connector to show up.
     Per-user data belongs in tool results and fragments.
     """
 
-    def __init__(self, name: str, *, body: str | None = None, html: str | None = None,
-                 title: str = "", scripts=(), modules=(), styles=(), head: str = "",
+    def __init__(self, name: str, *, body: str | SupportsHTML | None = None,
+                 html: str | SupportsHTML | None = None,
+                 title: str = "", scripts=(), modules=(), styles=(),
+                 head: str | SupportsHTML = "",
                  imports: dict | None = None, route: str | None = None, fetch: str = "hooks",
                  csp: dict | None = None,
                  border: bool | None = None, uri: str | None = None):
@@ -204,9 +235,7 @@ class Widget:
             if scripts or modules or styles or head or imports or route or fetch != "hooks":
                 raise TypeError("Widget(html=...) is used verbatim; scripts/modules/styles/"
                                 "head/route/fetch apply only to body=")
-            if not isinstance(html, str):
-                raise TypeError("html must be a str")
-            self.html, origins = html, set()
+            self.html, origins = _markup(html, "html"), set()
         else:
             self.html, origins = _document(body, title=self.title, head=head, scripts=scripts,
                                            modules=modules, styles=styles, route=route,
@@ -310,12 +339,17 @@ def _context(context) -> dict:
     return json.loads(encoded)
 
 
-def fragment(html: str, *, status: int = 200,
+def fragment(html: str | SupportsHTML, *, status: int = 200,
              content_type: str = "text/html; charset=utf-8", context=None) -> Result:
     """A tool result carrying an HTML fragment for the widget to swap in. A
     status of 400 or more marks the result `isError`; the bridge then reports
     the text instead of swapping it. The HTML goes to the widget only when the
-    tool is app-only (`visibility="app"`); escape everything you interpolate.
+    tool is app-only (`visibility="app"`).
+
+    `html` is a str, or an object whose class defines `__html__` (the protocol
+    Jinja and markupsafe use): FastHTML components, htpy elements,
+    `markupsafe.Markup`. Those escape the text you put in them; a str is used
+    as is, so escape everything you interpolate into one.
 
     `context` (a str, or `{"text": str, "data": dict}`) is what the model
     should know about the view after this action — "2 of 5 rows selected". The
@@ -325,8 +359,7 @@ def fragment(html: str, *, status: int = 200,
     sent both as `structuredContent` and as a labeled JSON text block, since
     Claude shows the model only text; keep what users wrote in `data`, and
     keep the sentence yours."""
-    if not isinstance(html, str):
-        raise TypeError("fragment: html must be a str")
+    html = _markup(html, "fragment: html")
     if not isinstance(status, int) or not 100 <= status <= 599:
         raise ValueError("fragment: status must be an HTTP status code")
     meta = {FRAGMENT_META: {"status": status, "contentType": content_type}}
