@@ -1,7 +1,7 @@
 """Hypermedia MCP Apps with micromcp: htmx over tool calls, with and without Django.
 
 A `Widget` is a static page the host renders in a sandboxed iframe, and
-`@mcp.tool(widget=...)` attaches it to the tool that shows it. Inside the page,
+`@widget.tool(mcp)` attaches it to the tool that shows it. Inside the page,
 htmx requests travel as host-proxied `tools/call`, and each app-only tool
 answers with an HTML `fragment`, which also tells the model what changed.
 
@@ -41,7 +41,7 @@ SWAP = 'hx-target="#app" hx-swap="innerMorph"'
 
 def todo_widget(title: str, load: str, route: str | None = None):
     """The same page for both servers; `load` is the htmx attribute that fetches the list."""
-    from micromcp import Widget
+    from micromcp_apps import Widget
     return Widget("todos", title=title, styles=CSS, scripts=[HTMX], route=route, border=True,
                   body=(f"<h1>{html.escape(title)}</h1>"
                         f'<div id="app" {load} hx-trigger="mcp:ready" {SWAP}>'
@@ -86,7 +86,8 @@ class Todos:
 # --- plain micromcp: app-only tools render the fragments ------------------------------
 
 def plain_mcp():
-    from micromcp import MCP, fragment
+    from micromcp import MCP
+    from micromcp_apps import fragment
 
     mcp, todos = MCP("hm-plain", "0.1.0"), Todos()
 
@@ -101,8 +102,8 @@ def plain_mcp():
                 f'<button type="button" hx-post="tool:todo_add" {SWAP}>Add</button></form>'
                 f'<button type="button" hx-post="tool:todo_clear" {SWAP}>Clear done</button>')
 
-    @mcp.tool(widget=todo_widget("Todos", 'hx-post="tool:todo_list"'),
-              title="Show todos", read_only=True)
+    @todo_widget("Todos", 'hx-post="tool:todo_list"').tool(
+        mcp, title="Show todos", read_only=True)
     def show_todos() -> str:
         """Show the interactive todo list to the user."""
         return todos.context("opened the list")["text"]
@@ -165,13 +166,14 @@ def django_asgi():
     from django.shortcuts import redirect, render
     from django.urls import path
     from django.views.decorators.http import require_POST
-    from micromcp import MCP, ASGIServer, django_async_view, django_routes, set_mcp_context
+    from micromcp import MCP, ASGIServer, django_async_view
+    from micromcp_apps.django import django_routes, set_mcp_context
 
     mcp, todos = MCP("hm-django", "0.1.0"), Todos()
     route = django_routes(mcp, prefixes=["/django/ui/"], host="localhost")
 
-    @mcp.tool(widget=todo_widget("Todos (Django)", 'hx-get="/django/ui/todos/"', route=route),
-              title="Show todos", read_only=True)
+    @todo_widget("Todos (Django)", 'hx-get="/django/ui/todos/"', route=route).tool(
+        mcp, title="Show todos", read_only=True)
     def show_todos() -> str:
         """Show the interactive todo list to the user."""
         return todos.context("opened the list")["text"]
@@ -216,6 +218,7 @@ def build(devhost: bool = False):
     sys.path.insert(0, str(HERE))
     import toolkit_lab
     from micromcp import MCP, ASGIServer
+    from micromcp_apps import DEVHOST_HTML
     TEMPLATES.update(toolkit_lab.LAB_TEMPLATES)
     plain = ASGIServer(plain_mcp(), path="/mcp", allowed_origins=ORIGINS)
     dj = django_asgi()
@@ -225,7 +228,7 @@ def build(devhost: bool = False):
     toolkit_lab.add_counter(ctx_mcp)
     ctx = ASGIServer(ctx_mcp, path="/ctx/mcp", allowed_origins=ORIGINS)
     cdn = ASGIServer(toolkit_lab.cdn_mcp(), path="/cdn/mcp", allowed_origins=ORIGINS)
-    dev = (HERE / "devhost.html").read_bytes() if devhost else None
+    dev = DEVHOST_HTML if devhost else None
 
     async def app(scope, receive, send):
         if scope["type"] == "lifespan":
@@ -263,8 +266,9 @@ except ImportError:
 if modal is not None:
     image = (modal.Image.debian_slim(python_version="3.12")
              .pip_install("django>=5.2")
-             .env({"PYTHONPATH": "/root/src", "WIRE_LOG": "1"})
-             .add_local_dir(HERE.parent / "src", "/root/src")
+             .env({"PYTHONPATH": "/root/src:/root/apps_src", "WIRE_LOG": "1"})
+             .add_local_dir(HERE.parent.parent / "src", "/root/src")        # micromcp
+             .add_local_dir(HERE.parent / "src", "/root/apps_src")          # micromcp-apps
              .add_local_dir(HERE / "vendor", "/root/vendor")
              .add_local_file(HERE / "toolkit_lab.py", "/root/toolkit_lab.py"))
     app = modal.App("micromcp-hypermedia")

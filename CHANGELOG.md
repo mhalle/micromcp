@@ -16,27 +16,33 @@
 
 ## Unreleased (branch `apps-hypermedia`)
 
-### MCP Apps
-- `Widget(name, body= | html=, scripts=, modules=, styles=, imports=, route=,
-  fetch=, csp=, border=)` declares a widget once (`imports=` writes an import
-  map, e.g. for three.js from a CDN); `@mcp.tool(widget=...)` registers
-  its `ui://` resource on first use and fills in the tool's `_meta`
-  (`ui.resourceUri` and the legacy `ui/resourceUri`). Assets are source
-  text, `pathlib.Path`s (inlined), or https URLs (their origins declared in
-  `csp.resourceDomains` automatically). `django_routes` returns its tool
-  name for `route=`.
+### Core
 - `@mcp.tool(visibility="app" | "model" | [...])` publishes
   `_meta.ui.visibility`; app-only tools are hidden from the model by the host
-  and callable by the server's widgets.
-- `micromcp.apps`: `page()` builds a static widget with `BRIDGE_JS` inlined
-  (MCP Apps 2026-01-26 handshake, ping/teardown, theme, resize,
-  `mcp.callTool`, and `mcp.fetch`, a `fetch()`-shaped tool-call transport
-  wired into htmx 4 and fixi); `fragment(html, status=, context=)` returns
-  HTML for the widget to swap in.
+  and callable by the server's widgets. New suite `tests/test_ui.py`.
+
+### micromcp-apps (new package in `apps/`)
+- A separate distribution, `micromcp-apps` (import `micromcp_apps`), built
+  only on micromcp's public API; the core and its single-file bundle carry no
+  widget code. The repository is a uv workspace of the two.
+- `Widget(name, body= | html=, scripts=, modules=, styles=, imports=, route=,
+  fetch=, csp=, border=)` declares a widget once (`imports=` writes an import
+  map, e.g. for three.js from a CDN). `@widget.tool(mcp, ...)` registers a
+  tool that shows it, naming it in the tool's `_meta` (`ui.resourceUri` and
+  the legacy `ui/resourceUri`) and publishing its `ui://` resource on first
+  use; `widget.register(mcp)` and `widget.tool_meta` serve tools registered
+  by hand. Assets are source text, `pathlib.Path`s (inlined), or https URLs
+  (their origins declared in `csp.resourceDomains` automatically); scripts
+  follow the body.
+- `page()` builds a widget document with `BRIDGE_JS` inlined (MCP Apps
+  2026-01-26 handshake, ping/teardown, theme, resize, `mcp.callTool`, and
+  `mcp.fetch`, a `fetch()`-shaped tool-call transport wired into htmx 4 and
+  fixi); `fragment(html, status=, context=)` returns HTML for the widget to
+  swap in. The bridge ships as `bridge.js` in the package.
 - Model context: `fragment(context=)` and `mcp.setContext()` send
   `ui/update-model-context` (text plus data as a labeled JSON block);
   `mcp.say()` and `data-mcp-say` send `ui/message`.
-- Channels: `mcp.channel(name, guards=, wait=, idle=, max_queue=)` is a
+- Channels: `Channel(mcp, name, guards=, wait=, idle=, max_queue=)` is a
   WebSocket-style channel between widgets and server code (`on_connect`,
   `on_message`, `on_disconnect`; `Connection.send`/`send_json`/`close`;
   `broadcast`/`broadcast_json`, thread-safe). In the widget,
@@ -44,14 +50,16 @@
   shared app-only tools carry it, `channel_recv` being a long poll (20 s by
   default, verified in Claude); connections are bound to their principal,
   dropped when idle, and closed when too far behind.
-- Django: `django_routes(mcp, prefixes=)` serves Django views to widgets
-  in process (prefix-confined, redirects followed, hypermedia headers
-  forwarded, JSON bodies); `set_mcp_context(response, text, data)`.
-- Examples: `mcp_app_3d.py` (a shared three.js scene the model builds and
-  the user selects in), `mcp_app_hypermedia.py` (todo widget with tools and
-  with Django views), `toolkit_lab.py` (nine self-testing toolkit variants and a
-  model-context counter), `devhost.html` (a development MCP Apps host).
-- New suite `tests/test_apps.py`.
+- Django: `micromcp_apps.django.django_routes(mcp, prefixes=)` serves Django
+  views to widgets in process (prefix-confined, redirects followed,
+  hypermedia headers forwarded, JSON bodies); `set_mcp_context(response,
+  text, data)`.
+- `DEVHOST_HTML`, a development MCP Apps host page.
+- Examples in `apps/examples/`: `mcp_app_3d.py` (a shared three.js scene the
+  model builds and the user selects in), `mcp_app_hypermedia.py` (todo widget
+  with tools and with Django views), `toolkit_lab.py` (nine self-testing
+  toolkit variants and a model-context counter). Suite
+  `apps/tests/test_apps.py`.
 
 ## 0.1.0 — 2026-09-14 (tagged; not yet on PyPI)
 

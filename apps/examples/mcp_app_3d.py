@@ -2,7 +2,7 @@
 
 The model builds the scene with tools (`scene_add`, `scene_remove`, `scene_clear`); the widget
 renders it with three.js, loaded from jsdelivr through an import map that `Widget` declares
-for the host. Every change is pushed to open widgets over a channel (`mcp.channel("scene")`),
+for the host. Every change is pushed to open widgets over a channel (`Channel(mcp, "scene")`),
 so objects the model adds appear at once. Click an object (or its name in the list) to select it: the widget tells the model
 what is selected through model context, "Delete selected" calls the same `scene_remove` tool the
 model uses, and "Ask Claude" posts a question about the selection into the chat.
@@ -202,7 +202,7 @@ resize();
 renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
 
 // The server pushes a snapshot on connect and after every change.
-const feed = mcp.channel("scene");
+const feed = Channel(mcp, "scene");
 feed.onmessage = e => {
   const snap = JSON.parse(e.data);
   if (snap.version !== version) { version = snap.version; build(snap); }
@@ -213,14 +213,15 @@ feed.onclose = e => mcp.status(`disconnected (${e.code}${e.reason ? ": " + e.rea
 
 
 def scene_mcp():
-    from micromcp import MCP, Widget, result
+    from micromcp import MCP, result
+    from micromcp_apps import Channel, Widget
 
     mcp, scene = MCP("hm-3d", "0.1.0"), Scene()
     viewer = Widget("scene3d-v2", title="3D scene", border=True, styles=CSS, body=BODY,
                     imports={"three": THREE + "build/three.module.js",
                              "three/addons/": THREE + "examples/jsm/"},
                     modules=[VIEWER_JS])
-    feed = mcp.channel("scene")               # open widgets get every change pushed to them
+    feed = Channel(mcp, "scene")               # open widgets get every change pushed to them
 
     @feed.on_connect
     def joined(conn):
@@ -229,7 +230,7 @@ def scene_mcp():
     def changed():
         feed.broadcast_json(scene.snapshot())
 
-    @mcp.tool(widget=viewer, title="Show the 3D scene", read_only=True)
+    @viewer.tool(mcp, title="Show the 3D scene", read_only=True)
     def show_scene() -> str:
         """Show the shared 3D scene to the user. They can orbit it, select objects (you will be
         told what they select), delete objects, and ask you about them."""
@@ -281,12 +282,13 @@ def scene_mcp():
 
 def build(devhost: bool = False):
     from micromcp import ASGIServer
+    from micromcp_apps import DEVHOST_HTML
     mcp = scene_mcp()
     inner = ASGIServer(mcp, path="/mcp", allowed_origins=ORIGINS)
     # The same server at a second path: a new connector there fetches the current widget,
     # where the host's cached copy for /mcp may be an older one.
     v2 = ASGIServer(mcp, path="/v2/mcp", allowed_origins=ORIGINS)
-    dev = (HERE / "devhost.html").read_bytes() if devhost else None
+    dev = DEVHOST_HTML if devhost else None
 
     async def app(scope, receive, send):
         if dev and scope["type"] == "http" and scope["path"] == "/devhost":
@@ -309,8 +311,9 @@ except ImportError:
 
 if modal is not None:
     image = (modal.Image.debian_slim(python_version="3.12")
-             .env({"PYTHONPATH": "/root/src", "WIRE_LOG": "1"})
-             .add_local_dir(HERE.parent / "src", "/root/src"))
+             .env({"PYTHONPATH": "/root/src:/root/apps_src", "WIRE_LOG": "1"})
+             .add_local_dir(HERE.parent.parent / "src", "/root/src")        # micromcp
+             .add_local_dir(HERE.parent / "src", "/root/apps_src"))         # micromcp-apps
     app = modal.App("micromcp-3d")
 
     @app.function(image=image, max_containers=1, timeout=600)

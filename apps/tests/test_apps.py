@@ -1,4 +1,4 @@
-"""MCP Apps helpers: tool visibility, fragments, model context, widget pages,
+"""micromcp-apps: fragments, model context, widget pages, Widget, channels,
 and Django views served to widgets through django_routes.
 
 The bridge's JavaScript is exercised end to end in examples/devhost.html (see
@@ -13,8 +13,9 @@ import subprocess
 import sys
 import tempfile
 
-from micromcp import (BRIDGE_JS, CONTEXT_META, META_CAPS, META_SERVER, META_VER, MCP, PROTOCOL,
-                      Server, Widget, django_routes, fragment, page, set_mcp_context)
+from micromcp import META_CAPS, META_SERVER, META_VER, MCP, PROTOCOL, Server
+from micromcp_apps import BRIDGE_JS, CONTEXT_META, Channel, Widget, fragment, page
+from micromcp_apps.django import django_routes, set_mcp_context
 
 OK = FAIL = 0
 
@@ -58,21 +59,7 @@ def client(mcp, authenticate=None):
     return rpc
 
 
-# ── visibility ─────────────────────────────────────────────────────────────
-print("visibility")
 mcp = MCP("apps-test")
-
-
-@mcp.tool(visibility="app")
-def app_only() -> str:
-    """Widget-only."""
-    return "x"
-
-
-@mcp.tool(visibility=["model", "app"], meta={"ui": {"resourceUri": "ui://w"}})
-def both() -> str:
-    """Model and widget."""
-    return "x"
 
 
 @mcp.tool(visibility="app")
@@ -82,19 +69,6 @@ def frag_tool():
 
 
 rpc = client(mcp)
-tools = {t["name"]: t for t in rpc("tools/list")[1]["result"]["tools"]}
-check("visibility='app' is published as _meta.ui.visibility",
-      tools["app_only"]["_meta"]["ui"], {"visibility": ["app"]})
-check("visibility merges into meta's ui object",
-      tools["both"]["_meta"]["ui"], {"resourceUri": "ui://w", "visibility": ["model", "app"]})
-for label, kwargs in [("unknown audience", {"visibility": "user"}),
-                      ("empty", {"visibility": []}),
-                      ("duplicates", {"visibility": ["app", "app"]}),
-                      ("conflicts with meta", {"visibility": "app",
-                                               "meta": {"ui": {"visibility": ["model"]}}}),
-                      ("meta ui not a dict", {"visibility": "app", "meta": {"ui": "x"}})]:
-    check(f"visibility refused: {label}",
-          raises(lambda kw=kwargs: mcp.tool(lambda: 1, name="bad", **kw)), "ValueError")
 
 # ── fragments and context ──────────────────────────────────────────────────
 print("fragments")
@@ -304,13 +278,13 @@ for label, make, exc in [
 wm = MCP("widget-test")
 
 
-@wm.tool(widget=w, read_only=True)
+@w.tool(wm, read_only=True)
 def show_board() -> str:
     """Show the board."""
     return "ok"
 
 
-@wm.tool(widget=w, visibility=["model", "app"])
+@w.tool(wm, visibility=["model", "app"])
 def show_board_too() -> str:
     """Show the board again."""
     return "ok"
@@ -318,27 +292,32 @@ def show_board_too() -> str:
 
 wrpc = client(wm)
 wt = {t["name"]: t["_meta"] for t in wrpc("tools/list")[1]["result"]["tools"]}
-check("tool(widget=) names the resource under both keys",
+check("Widget.tool names the resource under both keys",
       wt["show_board"], {"ui": {"resourceUri": "ui://board"}, "ui/resourceUri": "ui://board"})
-check("widget= and visibility= merge", wt["show_board_too"]["ui"],
+check("Widget.tool and visibility= merge", wt["show_board_too"]["ui"],
       {"resourceUri": "ui://board", "visibility": ["model", "app"]})
+check("tool_meta is the same pointer, for a tool registered by hand", w.tool_meta,
+      wt["show_board"])
 listed = wrpc("resources/list")[1]["result"]["resources"]
 check("two tools, one resource, with the MCP App MIME type",
       [(r["uri"], r["mimeType"]) for r in listed], [("ui://board", "text/html;profile=mcp-app")])
 check("the listing carries the widget's meta", listed[0].get("_meta"), w.meta)
 read = wrpc("resources/read", {"uri": "ui://board"})[1]["result"]["contents"][0]
 check("resources/read returns the page", read["text"], w.html)
+check("register() is idempotent", (w.register(wm), len(wm.resources)), ("ui://board", 1))
 check("a different widget at the same uri is refused",
-      raises(lambda: wm.tool(lambda: 1, name="other", widget=Widget("board", body="other"))),
+      raises(lambda: Widget("board", body="other").tool(wm, lambda: 1, name="other")),
       "ValueError")
 check("a refused tool registers nothing", "other" in wm.tools, False)
-check("meta naming another resource conflicts with widget=",
-      raises(lambda: wm.tool(lambda: 1, name="x3", widget=w,
-                             meta={"ui": {"resourceUri": "ui://elsewhere"}})), "ValueError")
-check("a widget must be a Widget",
-      raises(lambda: wm.tool(lambda: 1, name="x4", widget="ui://board"), TypeError), "TypeError")
+check("meta naming another resource is refused",
+      raises(lambda: w.tool(wm, lambda: 1, name="x3",
+                            meta={"ui": {"resourceUri": "ui://elsewhere"}})), "ValueError")
+m2 = MCP("refused")
+check("a tool the registry refuses ...",
+      raises(lambda: w.tool(m2, lambda: 1, name="no spaces")), "ValueError")
+check("... publishes no widget", "ui://board" in m2.resources, False)
 check("one widget can serve several servers",
-      raises(lambda: MCP("second").tool(lambda: 1, name="y", widget=w)), None)
+      raises(lambda: w.tool(MCP("second"), lambda: 1, name="y")), None)
 if django:
     check("django_routes returns its tool name, for Widget(route=)",
           django_routes(MCP("named"), prefixes=["/app/"]), "django_http")
@@ -350,7 +329,7 @@ import time  # noqa: E402
 
 cm = MCP("channel-test")
 events = []
-room = cm.channel("room")
+room = Channel(cm, "room")
 
 
 @room.on_connect
@@ -370,9 +349,9 @@ def room_left(conn):
     events.append(("disconnect", conn.id))
 
 
-cm.channel("private", guards=[lambda p: p is not None])
-small = cm.channel("small", max_queue=3)
-brief = cm.channel("brief", idle=0.2)
+Channel(cm, "private", guards=[lambda p: p is not None])
+small = Channel(cm, "small", max_queue=3)
+brief = Channel(cm, "brief", idle=0.2)
 crpc = client(cm, authenticate=lambda h: {"sub": "u1"}
               if h.get("authorization") == "Bearer t" else None)
 
@@ -387,8 +366,8 @@ check("four channel tools, registered once, all app-only",
       sorted((n, listed[n]["_meta"]["ui"]["visibility"][0]) for n in listed if n.startswith("channel_")),
       [("channel_close", "app"), ("channel_open", "app"), ("channel_recv", "app"),
        ("channel_send", "app")])
-check("a channel name is registered once", raises(lambda: cm.channel("room")), "ValueError")
-check("a channel name must be a tool-style name", raises(lambda: cm.channel("no spaces")),
+check("a channel name is registered once", raises(lambda: Channel(cm, "room")), "ValueError")
+check("a channel name must be a tool-style name", raises(lambda: Channel(cm, "no spaces")),
       "ValueError")
 o = ctool("channel_open", {"channel": "room", "params": "who=ann&partial=1"})
 check("open runs on_connect and returns its frames",
@@ -444,8 +423,13 @@ ctool("channel_open", {"channel": "brief"})             # any channel request sw
 check("an idle connection is dropped", ctool("channel_recv", {"conn": y["conn"]})["closed"], True)
 check("Connection.send takes text", raises(lambda: a and room.connections[0].send({"x": 1}), TypeError),
       "TypeError")
-check("a channel's wait caps the long poll",
-      raises(lambda: cm.channel("bad", wait=-1)), "ValueError")
+check("a channel's wait must not be negative",
+      raises(lambda: Channel(cm, "bad", wait=-1)), "ValueError")
+taken = MCP("taken")
+taken.tool(lambda: 1, name="channel_open")
+check("a server whose tool names are taken refuses its first channel",
+      (raises(lambda: Channel(taken, "x")), "channel_send" in taken.tools), ("ValueError", False))
+check("channels are per server", bool(Channel(MCP("other"), "room")), True)
 
 print(f"\n{OK} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

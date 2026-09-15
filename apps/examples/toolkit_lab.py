@@ -245,7 +245,7 @@ def _body(kit):
 
 
 def _page(kit):
-    from micromcp import BRIDGE_JS
+    from micromcp_apps import BRIDGE_JS
     n = f' nonce="{NONCE}"' if kit in ("live_csp", "datastar_csp") else ""
 
     def tag(src, module=False):
@@ -301,8 +301,9 @@ def _widget(page_html, kit):
 
 
 def lab_mcp():
-    from micromcp import MCP, Widget, fragment
-    from micromcp.contrib.django import django_routes
+    from micromcp import MCP
+    from micromcp_apps import Widget, fragment
+    from micromcp_apps.django import django_routes
 
     mcp = MCP("hm-lab", "0.1.0")
     for kit in KITS:
@@ -365,7 +366,7 @@ def lab_mcp():
                       'hx-trigger="mcp:ready" hx-target="#app" hx-swap="innerMorph">'
                       '<em>loading&hellip;</em></div><small data-mcp-status></small>')
 
-    @mcp.tool(widget=cdn, read_only=True, title="Toolkit lab: htmx from a CDN")
+    @cdn.tool(mcp, read_only=True, title="Toolkit lab: htmx from a CDN")
     def lab_cdn() -> str:
         """Open a widget that loads htmx from a CDN instead of inlining it."""
         return "Opened the CDN widget; it lists the htmx variant's items."
@@ -405,7 +406,8 @@ def _cdn_scripts(variant):
 
 
 def cdn_mcp():
-    from micromcp import MCP, Widget, fragment, page
+    from micromcp import MCP
+    from micromcp_apps import Widget, fragment, page
 
     mcp = MCP("hm-cdn", "0.1.0")
 
@@ -422,12 +424,12 @@ def cdn_mcp():
                                   title="CDN test: origin not declared",
                                   scripts=_cdn_scripts("undeclared")))
 
-    @mcp.tool(widget=declared, read_only=True, title="CDN test: origin declared")
+    @declared.tool(mcp, read_only=True, title="CDN test: origin declared")
     def cdn_declared() -> str:
         """Open a widget that loads htmx from a CDN, with the origin declared in its csp."""
         return "Opened the declared-origin CDN widget; it reports whether htmx loaded."
 
-    @mcp.tool(widget=undeclared, read_only=True, title="CDN test: origin not declared")
+    @undeclared.tool(mcp, read_only=True, title="CDN test: origin not declared")
     def cdn_undeclared() -> str:
         """Open the control widget: the same CDN script with no origin declared."""
         return "Opened the undeclared-origin CDN widget; it reports whether htmx loaded."
@@ -492,7 +494,7 @@ def _ctx_render(n, seq):
 
 
 def add_counter(mcp):
-    from micromcp import fragment, page
+    from micromcp_apps import fragment, page
 
     uri = "ui://hm-lab/context-v1"
     body = ('<h1>Context lab: counter</h1>'
