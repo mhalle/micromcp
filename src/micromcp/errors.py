@@ -44,6 +44,8 @@ class Unauthorized(Error):
     """Raise from `authenticate` (or a handler, or a guard) to answer 401 with a
     `WWW-Authenticate: Bearer ...` challenge, which is what makes an OAuth-capable
     client (Claude.ai, the Inspector, the SDKs) start its authorization flow.
+    The `insufficient_scope` form answers 403 instead (RFC 6750 §3.1): the token
+    is fine but lacks a scope, and the client may step up to it.
 
         def authenticate(headers):
             token = headers.get("authorization", "").removeprefix("Bearer ")
@@ -78,6 +80,14 @@ class Unauthorized(Error):
         """The `error="invalid_token"` form. Raise it; do not return it."""
         return cls("Invalid token", error="invalid_token", error_description=description, **k)
 
+    @classmethod
+    def insufficient_scope(cls, scope, description="The access token lacks a scope this "
+                           "operation needs", **k):
+        """The `error="insufficient_scope"` form, answered 403. `scope` names every
+        scope the operation needs, so the client can ask for them in one step-up."""
+        return cls("Insufficient scope", scope=scope, error="insufficient_scope",
+                   error_description=description, **k)
+
     def challenge(self, default_resource_metadata=None) -> list[tuple[str, str]]:
         """The `WWW-Authenticate` header for this error, as a fresh list. Pure:
         an instance can be shared or module-level without one request's
@@ -91,7 +101,8 @@ class Unauthorized(Error):
         return [("WWW-Authenticate", value)]
 
     def refresh(self):
-        """Recompute `headers` from the fields (after changing one)."""
+        """Recompute `headers` and the status from the fields (after changing one)."""
+        self.status = 403 if self.error == "insufficient_scope" else 401
         self.headers = self.challenge()
         return self
 

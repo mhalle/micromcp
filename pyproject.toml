@@ -28,6 +28,7 @@ dependencies = []
 
 [project.optional-dependencies]
 django = ["django>=4.2"]
+oauth = ["PyJWT[crypto]>=2.14"]      # micromcp.contrib.oauth: JWT signatures, key refetch limits
 
 # Test dependencies are a PEP 735 group, not a published extra: they resolve to
 # ~100 packages, which has no place in the metadata of a zero-dependency library.
@@ -47,6 +48,7 @@ test = [
   "a2wsgi",
   "django>=4.2",
   "pydantic>=2",
+  "PyJWT[crypto]>=2.14",
 ]
 
 [project.urls]

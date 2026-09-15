@@ -290,7 +290,9 @@ the answer when the entry is invoked, and hides it in listings.
 handoff to one is not. Raise `Unauthorized` from `authenticate` (or from a
 handler) and the answer is `401` with a `WWW-Authenticate: Bearer` challenge,
 which is what makes an OAuth-capable client (Claude.ai, the Inspector, the
-SDKs) start its flow. Pass `resource_metadata=` to serve the RFC 9728
+SDKs) start its flow. `Unauthorized.insufficient_scope("files:write")` is the
+`403` form with `error="insufficient_scope"`: the token is fine but lacks a
+scope, and the client may step up to it. Pass `resource_metadata=` to serve the RFC 9728
 document at `/.well-known/oauth-protected-resource` (and at the
 path-suffixed form when `path=` is set); the challenge then names that
 document's URL by default, derived at construction from the document's own
@@ -324,6 +326,48 @@ app = ASGIServer(mcp, authenticate=authenticate, path="/mcp",
                                     "scopes_supported": ["read"],
                                     "bearer_methods_supported": ["header"]})
 ```
+
+**Tokens from an identity provider.** `micromcp.contrib.oauth` is the
+resource server's side of MCP authorization for tokens that a provider such
+as Auth0, WorkOS, Keycloak, or Okta issues (`pip install "micromcp[oauth]"`,
+which adds PyJWT for the signature checks):
+
+```python
+from micromcp import MCP, ASGIServer, Principal
+from micromcp.contrib.oauth import OAuth
+
+auth = OAuth(issuer="https://auth.example.com/",           # exactly as the provider writes it
+             resource="https://todos.example.com/mcp",     # this server: the tokens' audience
+             scopes=["todos:read"])
+app = ASGIServer(mcp, path="/mcp", authenticate=auth, resource_metadata=auth.metadata)
+
+@mcp.tool(guards=[auth.requires("todos:write")])       # hidden without the scope; 403 if called
+def todo_add(who: Principal, text: str) -> dict: ...
+```
+
+On the first token it fetches the provider's metadata from the URLs MCP
+clients try, refusing a document whose `issuer` differs, then checks each
+JWT's signature against the provider's published keys, its issuer, its
+audience (`resource`, or `audience=`), and its expiry and not-before, with
+asymmetric algorithms only. Keys are cached, and tokens naming an unknown
+key refetch them at most every 30 seconds. The principal is `{"sub",
+"client_id", "scopes", "claims"}`. A missing or bad token is `401` with the
+challenge; an unreachable provider is `503`, so clients do not start a new
+sign-in for an outage. `auth.discover()` fetches the metadata at startup
+instead, and logs a warning for what would stop MCP clients from signing
+in: no PKCE `S256`, or neither Client ID Metadata Documents nor dynamic
+client registration.
+
+`auth.requires(...)` is a guard: a tool the token cannot use is left out of
+listings, and a direct call is `403 insufficient_scope` naming every scope
+the tool needs, which lets the client step up. `auth.check(who, ...)` does
+the same inside a handler, for a tool that should stay listed. `implies=`
+declares a scope hierarchy (`{"todos:admin": ["todos:write"]}`).
+`introspection=(client_id, secret)` validates opaque tokens at the
+provider's introspection endpoint instead; answers are reused for up to a
+minute and must name this server in `aud`. For development and tests,
+`OAuth.static({"dev-token": {"sub": "me", "scope": "todos:write"}})` stands in
+for a provider and yields the same principal.
 
 ## Mounting
 
