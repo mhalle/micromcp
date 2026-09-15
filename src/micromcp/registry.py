@@ -9,7 +9,7 @@ import re
 from ._constants import _NAME_RE, INVALID_PARAMS, log
 
 from .docstrings import _parse_doc
-from .errors import Error
+from .errors import Error, Unauthorized
 from .schema import _fname, _hints, _input_schema, _output_schema
 
 _LABEL = r"[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?"
@@ -105,19 +105,36 @@ def _is_async(fn) -> bool:
 
 
 def _allowed(entry, principal, strict=False) -> bool:
-    """Evaluate an entry's guards. A guard that raises denies (fail closed).
-    When the entry is being invoked (`strict`), a guard that raises an
-    `Error` such as `Unauthorized` chooses the answer instead — a 401 with its
-    challenge; in a listing the entry is simply hidden."""
-    try:
-        return all(g(principal) for g in entry.get("_guards", ()))
-    except Error:
-        if strict:
-            raise
-        return False
-    except Exception:
-        log.exception("guard for %r raised; denying", entry.get("name"))
-        return False
+    """Evaluate an entry's guards. A guard that returns false, or raises
+    anything but an `Error`, denies (fail closed). When the entry is being
+    invoked (`strict`), a guard that raises an `Error` such as `Unauthorized`
+    chooses the answer instead — a 401 with its challenge; in a listing the
+    entry is simply hidden. Invoked, every guard runs, so several that raise
+    `insufficient_scope` answer with one 403 naming all their scopes, and the
+    client steps up once."""
+    scopes, first = [], None
+    for guard in entry.get("_guards", ()):
+        try:
+            if not guard(principal):
+                return False
+        except Unauthorized as e:
+            if not strict:
+                return False
+            if e.error != "insufficient_scope":
+                raise
+            first = first or e
+            scopes += [s for s in (e.scope or "").split() if s not in scopes]
+        except Error:
+            if strict:
+                raise
+            return False
+        except Exception:
+            log.exception("guard for %r raised; denying", entry.get("name"))
+            return False
+    if first is not None:
+        raise Unauthorized.insufficient_scope(" ".join(scopes), first.error_description,
+                                              resource_metadata=first.resource_metadata)
+    return True
 
 
 def _wire_name(kind, explicit, f, registry, replace) -> str:

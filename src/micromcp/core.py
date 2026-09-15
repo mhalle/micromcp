@@ -915,19 +915,17 @@ class _Core:
             if isinstance(rid, bool) or not isinstance(rid, (str, int)):
                 return _err(400, None, INVALID_REQUEST,
                             "Invalid Request: id must be a string or integer"), None
-            method, params, era = self._validate(headers, body)
-            principal = None
-            if self.authenticate:
-                if _is_async(self.authenticate):
-                    principal = await self.authenticate(headers)
-                else:
-                    principal = await self.offload(self.authenticate, headers, aux=True)
-                if isinstance(principal, Error):
-                    raise principal          # `return Unauthorized(...)` means raise, never "allow"
-                if isinstance(principal, BaseException) or (
-                        isinstance(principal, type) and issubclass(principal, BaseException)):
-                    log.error("authenticate returned an exception %r; refusing", principal)
-                    raise Error(INTERNAL_ERROR, "Internal error", 500)
+            try:
+                method, params, era = self._validate(headers, body)
+            except Error as e:
+                # A refused protocol version (-32022) answers a client probing for
+                # an era, and SDK clients fall back to the 2025 handshake on any
+                # error: an outage or a missing token on the modern probe would
+                # reach the user as this refusal. Authentication answers first.
+                if e.code == UNSUPPORTED_VERSION and self.authenticate:
+                    await self._authenticate(headers)
+                raise
+            principal = await self._authenticate(headers) if self.authenticate else None
             bound = (await self._bind_call(params, principal, big)
                      if method == "tools/call" else None)
         except Error as e:            # an auth error names the era the request was served in
@@ -936,6 +934,21 @@ class _Core:
             log.exception("request preparation failed")
             return _err(500, rid, INTERNAL_ERROR, "Internal error"), None
         return None, (method, params, principal, rid, bound, era)
+
+    async def _authenticate(self, headers):
+        """The principal `authenticate` returns; an `Error` it raises or returns
+        is raised."""
+        if _is_async(self.authenticate):
+            principal = await self.authenticate(headers)
+        else:
+            principal = await self.offload(self.authenticate, headers, aux=True)
+        if isinstance(principal, Error):
+            raise principal          # `return Unauthorized(...)` means raise, never "allow"
+        if isinstance(principal, BaseException) or (
+                isinstance(principal, type) and issubclass(principal, BaseException)):
+            log.error("authenticate returned an exception %r; refusing", principal)
+            raise Error(INTERNAL_ERROR, "Internal error", 500)
+        return principal
 
     def _error_reply(self, e, rid, headers=None, era="modern"):
         """An Error as a reply. An `Unauthorized` without its own challenge URL
@@ -1052,15 +1065,21 @@ class _Core:
         entry = self.mcp.tools.get(params.get("name"))
         return bool(entry and entry.get("_context"))
 
-    def spawn(self, req, headers=None):
-        """Start `req` on a task that feeds SSE frames (bytes) into a bounded
-        queue; None is the end-of-stream sentinel. Returns (queue, worker, stop).
+    _HEAD_HOLD = 1.0       # seconds a stream's head waits for its first frame, at most
+    _SILENT = object()     # begin_stream: no frame within the hold; a keepalive is due
+    _NOTHING = object()    # _frames: no first item taken off the queue
 
-        The response head is already committed as 200 SSE when the handler
-        runs, so an `Error` it raises travels in-band as an error frame: its
-        HTTP status and headers (a 401 challenge, a 503) cannot be expressed.
-        Authentication and guards run before the stream opens; that is where
-        those answers belong."""
+    def spawn(self, req, headers=None):
+        """Start `req` on a task that feeds a bounded queue: notifications as
+        SSE frames (bytes), then the final answer as its (status, payload)
+        reply, then None, the end-of-stream sentinel. Returns (queue, worker,
+        stop).
+
+        Transports hold the response head up to `_HEAD_HOLD` seconds for the
+        first item (see `begin_stream`), so a handler that fails with an
+        `Error` at its start, before any notification (a 403 from a scope
+        check), is answered with that status and its headers. Once the head is
+        committed as 200 SSE, an `Error` travels in-band as an error frame."""
         q: asyncio.Queue = asyncio.Queue(maxsize=self.queue_size)
         stop = threading.Event()
         sent = [0]
@@ -1079,12 +1098,7 @@ class _Core:
 
         async def run():
             try:
-                status, payload = await self.respond(req, emit=emit, stop=stop, headers=headers)
-                if status != 200:
-                    log.warning("streamed %r ended with HTTP %s; delivered in-band, "
-                                "its status and headers cannot reach the client",
-                                req[1].get("name") or req[0], status)
-                await q.put(b"data: " + _encode(200, payload)[1] + b"\n\n")
+                await q.put(await self.respond(req, emit=emit, stop=stop, headers=headers))
             finally:
                 await q.put(None)
 
@@ -1103,12 +1117,63 @@ class _Core:
             log.warning("handler for %r ignored cancellation and is still running",
                         req[1].get("name"))
 
+    def _frame(self, item, req) -> bytes:
+        """The SSE bytes for one queue item: a notification as it is, the final
+        answer as its frame (logged when its status cannot reach the client)."""
+        if isinstance(item, bytes):
+            return item
+        status, payload = item
+        if status != 200:
+            log.warning("streamed %r ended with HTTP %s; delivered in-band, "
+                        "its status and headers cannot reach the client",
+                        req[1].get("name") or req[0], status)
+        return b"data: " + _encode(200, payload)[1] + b"\n\n"
+
+    async def begin_stream(self, req, headers=None):
+        """Start a streaming request, holding its response head up to
+        `_HEAD_HOLD` seconds (or `keepalive`, if shorter) for the first frame.
+        Returns (out, None) when the
+        handler finished first with an answer other than 200 (an `Error` such
+        as `Unauthorized` raised before its first notification), for the caller
+        to send as an ordinary reply with its status and headers; otherwise
+        (None, frames), an async generator of SSE bytes whose closing cancels
+        the handler. Iterate it on the event loop this was awaited on."""
+        q, worker, stop = self.spawn(req, headers)
+        try:
+            first = await asyncio.wait_for(q.get(), min(self.keepalive, self._HEAD_HOLD))
+        except TimeoutError:
+            first = self._SILENT
+        except BaseException:
+            await self.finish(q, worker, stop, req)
+            raise
+        if isinstance(first, tuple) and first[0] != 200:
+            await self.finish(q, worker, stop, req)
+            return first, None
+        return None, self._frames(q, worker, stop, req, first)
+
     async def frames(self, req, headers=None):
         """Async generator of SSE bytes for a validated streaming request, with
         keepalive comments during silence. Closing the generator cancels the
-        handler. Used by adapters that stream but have no ASGI receive channel."""
+        handler. For adapters that stream but have no ASGI receive channel;
+        `begin_stream` also keeps the status of an early `Error`."""
         q, worker, stop = self.spawn(req, headers)
+        gen = self._frames(q, worker, stop, req)
         try:
+            async for chunk in gen:
+                yield chunk
+        finally:
+            await gen.aclose()
+
+    async def _frames(self, q, worker, stop, req, first=_NOTHING):
+        """SSE bytes from a spawned request's queue. `first` is an item already
+        taken off it (or _SILENT: a keepalive is due first)."""
+        try:
+            if first is self._SILENT:
+                yield b": keepalive\n\n"
+            elif first is None:
+                return
+            elif first is not self._NOTHING:
+                yield self._frame(first, req)
             while True:
                 try:
                     item = await asyncio.wait_for(q.get(), self.keepalive)
@@ -1117,6 +1182,6 @@ class _Core:
                     continue
                 if item is None:
                     return
-                yield item
+                yield self._frame(item, req)
         finally:
             await self.finish(q, worker, stop, req)

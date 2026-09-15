@@ -38,9 +38,12 @@ def django_async_view(server: ASGIServer):
 
     Context tools stream: the view returns a StreamingHttpResponse of SSE
     frames, and Django closing the response (client gone) cancels the handler.
-    Streaming needs Django's ASGI handler; under Django's WSGI handler the
-    frames are delivered in one buffered response.
+    Streaming needs Django's ASGI handler, which also holds the response up to
+    a second for the first frame, so an `Error` a tool raises at its start
+    keeps its status; under Django's WSGI handler the frames are delivered in
+    one buffered response.
     """
+    from django.core.handlers.asgi import ASGIRequest
     from django.http import HttpResponse, StreamingHttpResponse
     from django.views.decorators.csrf import csrf_exempt
 
@@ -57,13 +60,17 @@ def django_async_view(server: ASGIServer):
         else:
             req = None
         if early is None and server.wants_stream(req, headers):
-            resp = StreamingHttpResponse(server.frames(req, headers),
-                                         content_type="text/event-stream")
-            resp["Cache-Control"] = "no-cache"
-            resp["X-Accel-Buffering"] = "no"
-            for k, v in server.stream_headers(req, headers):
-                resp[k] = v
-            return resp
+            if isinstance(request, ASGIRequest):    # iterated on this view's event loop
+                early, chunks = await server.begin_stream(req, headers)
+            else:
+                chunks = server.frames(req, headers)
+            if chunks is not None:
+                resp = StreamingHttpResponse(chunks, content_type="text/event-stream")
+                resp["Cache-Control"] = "no-cache"
+                resp["X-Accel-Buffering"] = "no"
+                for k, v in server.stream_headers(req, headers):
+                    resp[k] = v
+                return resp
         out = early if early is not None else await server.respond(req, headers=headers)
         status, payload = out
         status, body = _encode(status, payload)
