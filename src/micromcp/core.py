@@ -305,6 +305,23 @@ class _Pool:
         with self._lock:
             self._reset()
 
+def _not_json(token):
+    raise ValueError(f"{token} is not JSON")
+
+
+def _finite(text):
+    value = float(text)
+    if value in (float("inf"), float("-inf")):
+        raise ValueError(f"{text} overflows a double")
+    return value
+
+
+def _loads(raw):
+    """json.loads that refuses what RFC 8259 does not define: the NaN/Infinity
+    literals Python's parser accepts, and numbers that overflow to infinity.
+    Handlers only ever see finite numbers."""
+    return json.loads(raw, parse_constant=_not_json, parse_float=_finite)
+
 
 class _Core:
     """Transport-neutral MCP logic: validate, dispatch, wrap.
@@ -876,8 +893,8 @@ class _Core:
         rid = None
         try:
             try:
-                body = (await self.offload(json.loads, raw, aux=True) if big
-                        else json.loads(raw or b"{}"))
+                body = (await self.offload(_loads, raw, aux=True) if big
+                        else _loads(raw or b"{}"))
             except Error:
                 raise
             except Exception:
