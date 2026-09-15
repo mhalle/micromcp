@@ -38,10 +38,14 @@
   swap in. The bridge ships as `bridge.js` in the package.
 - HTML arguments (`fragment()`, `page()`, and `Widget`'s `body=`, `head=`,
   `html=`) take a str or any object whose class defines `__html__`, the
-  markupsafe protocol: FastHTML components, htpy elements, `markupsafe.Markup`.
-  Those escape the text put in them, so a widget needs no hand-escaped
-  f-strings. Output is normalized to an exact str, so a `Markup` body no
-  longer escapes the page built around it.
+  markupsafe protocol (`SupportsHTML`): FastHTML components, htpy elements,
+  `markupsafe.Markup`. Those escape text and attribute values, so a widget
+  needs no hand-escaped f-strings. As in markupsafe, `__html__` wins over a
+  str's own value. Output is normalized to an exact str, so a `Markup` body
+  no longer escapes the page built around it.
+- `tool_url(name, **args)` builds a `tool:` URL with percent-encoded
+  arguments, so user text in a value can neither add arguments nor change
+  others (an f-string URL lets `milk&role=admin` add one).
 - Model context: `fragment(context=)` and `mcp.setContext()` send
   `ui/update-model-context` (text plus data as a labeled JSON block);
   `mcp.say()` and `data-mcp-say` send `ui/message`.

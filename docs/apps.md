@@ -79,22 +79,35 @@ and fragments (see the core README's UI apps section).
 object that renders itself through `__html__`, the protocol Jinja and
 markupsafe use: FastHTML's components (`fastcore.xml`, which has no
 dependencies of its own, or `fasthtml.common`), htpy elements, and
-`markupsafe.Markup`. Those libraries escape the text you put in them, so
-user-written data goes straight in:
+`markupsafe.Markup`. Those libraries escape text and attribute values, so
+user-written data can go into an element's text or an attribute's value:
 
 ```python
 from fastcore.xml import Button, Div, Li, Span, Ul
+from micromcp.apps import tool_url
 
 def render(todos):
-    return Div(Ul(*[Li(Button("done", hx_post=f"tool:todo_toggle?id={t.id}", hx_target="#app"),
+    return Div(Ul(*[Li(Button("done", hx_post=tool_url("todo_toggle", id=t.id), hx_target="#app"),
                        Span(t.text))                 # t.text is escaped
                     for t in todos]))
 ```
 
+Escaping does not protect a value that is parsed again after the browser
+decodes it. Build `tool:` URLs with `tool_url(name, **args)`, which
+percent-encodes the arguments: in `f"tool:item_remove?name={name}"`, a name
+such as `milk&role=admin` adds an argument. Build `hx_vals` with
+`json.dumps({...})`, never by concatenating a JSON string (`fasthtml.common`
+components also take the dict itself; `fastcore.xml` renders a dict as
+`key:value` text, which is not JSON). And never take
+attribute names or tag names from user data: components interpolate names
+unescaped, and a forged `data-mcp-say` posts text into the chat as the user.
+
 Pass one object, so wrap siblings in an element. It is rendered once, when
 the page or fragment is built, and its output is trusted as markup, exactly
 as Jinja trusts it. A str is used as is: escape what you interpolate into one
-yourself (`html.escape`).
+yourself (`html.escape`). Scripts and styles belong in `scripts=` and
+`styles=`: `fastcore.xml`'s `Script` and `Style` escape their text
+(`a && b` arrives as `a &amp;&amp; b`), unlike `fasthtml.common`'s.
 
 ## Hypermedia widgets: htmx, fixi, Django views
 

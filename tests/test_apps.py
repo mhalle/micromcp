@@ -20,7 +20,8 @@ except ModuleNotFoundError:            # the single-file bundle carries only the
     sys.exit(0)
 
 from micromcp import META_CAPS, META_SERVER, META_VER, MCP, PROTOCOL, Server
-from micromcp.apps import BRIDGE_JS, CONTEXT_META, Channel, Widget, fragment, page
+from micromcp.apps import (BRIDGE_JS, CONTEXT_META, Channel, SupportsHTML, Widget, fragment,
+                           page, tool_url)
 from micromcp.apps.django import django_routes, set_mcp_context
 
 OK = FAIL = 0
@@ -149,6 +150,90 @@ check("Widget(html=) uses an object verbatim",
       Widget("mk2", html=Html("<!doctype html><p>v</p>")).html, "<!doctype html><p>v</p>")
 check("Widget(body=) refuses an int", raises(lambda: Widget("mk3", body=5), TypeError),
       "TypeError")
+import enum  # noqa: E402
+
+
+class Status(str, enum.Enum):     # a str that renders itself: __html__ wins, as in Jinja
+    OPEN = "open"
+
+    def __html__(self):
+        return f'<span class="badge">{self.value}</span>'
+
+
+class PlainText(str):             # text that escapes itself
+    def __html__(self):
+        return self.replace("&", "&amp;").replace("<", "&lt;")
+
+
+class MetaAnything(type):         # a metaclass that answers every name, __html__ included
+    def __getattr__(cls, name):
+        return lambda *a: "<p>not markup</p>"
+
+
+class ViaMeta(metaclass=MetaAnything):
+    pass
+
+
+class NoneHtml:
+    __html__ = None               # Python's spelling of "not supported"
+
+
+class Static:
+    @staticmethod
+    def __html__():
+        return "<p>static</p>"
+
+
+class Pretend:                    # a proxy that claims to be a str (Mock(spec=str), SimpleLazyObject)
+    @property
+    def __class__(self):
+        return str
+
+
+class EscapingStr(str):           # like Markup: its replace() escapes the replacement
+    def replace(self, old, new, count=-1):
+        return EscapingStr(str.replace(self, old, new.replace("&", "&amp;"), count))
+
+
+text = lambda v: fragment(v)["content"][0]["text"]
+inst = Html("<p>class</p>")
+inst.__html__ = lambda: "<p>instance</p>"
+check("a str subclass's own __html__ wins", text(Status.OPEN), '<span class="badge">open</span>')
+check("text that escapes itself is escaped", text(PlainText("<b>")), "&lt;b>")
+check("the class's __html__ wins over the instance's", text(inst), "<p>class</p>")
+check("a staticmethod __html__ renders", text(Static()), "<p>static</p>")
+for label, bad in [("__html__ from a metaclass __getattr__", ViaMeta()),
+                   ("__html__ = None", NoneHtml()), ("a proxy that claims to be a str", Pretend())]:
+    check(f"fragment refuses {label}", raises(lambda b=bad: fragment(b), TypeError), "TypeError")
+check("a Markup-like title is escaped once",
+      "<title>A &amp; B</title>" in page("", title=EscapingStr("A & B")), True)
+check("page refuses a title that is not a str", raises(lambda: page("", title=5), TypeError),
+      "TypeError")
+check("SupportsHTML is exported", SupportsHTML.__name__, "SupportsHTML")
+
+# ── tool_url ───────────────────────────────────────────────────────────────
+print("tool_url")
+from urllib.parse import parse_qs  # noqa: E402
+
+u = tool_url("item_remove", name="milk&role=admin", n=3, q="a+b c")
+check("tool_url percent-encodes values", u,
+      "tool:item_remove?name=milk%26role%3Dadmin&n=3&q=a%2Bb%20c")
+check("... which decode back to exactly the arguments given", parse_qs(u.split("?", 1)[1]),
+      {"name": ["milk&role=admin"], "n": ["3"], "q": ["a+b c"]})
+if shutil.which("node"):          # the bridge parses the query with URLSearchParams
+    js = "console.log(JSON.stringify(Object.fromEntries(new URLSearchParams(process.argv[1]))))"
+    proc = subprocess.run([shutil.which("node"), "-e", js, u.split("?", 1)[1]],
+                          capture_output=True, text=True)
+    check("... and so does the bridge's URLSearchParams", json.loads(proc.stdout or "null"),
+          {"name": "milk&role=admin", "n": "3", "q": "a+b c"})
+else:
+    print("  skip  URLSearchParams decoding (node not installed)")
+check("tool_url with no arguments", tool_url("todo_list"), "tool:todo_list")
+for label, fn, exc in [("a bad tool name", lambda: tool_url("a b"), ValueError),
+                       ("a name with a trailing newline", lambda: tool_url("ok\n"), ValueError),
+                       ("a dict value", lambda: tool_url("t", x={"a": 1}), TypeError),
+                       ("a bool value", lambda: tool_url("t", x=True), TypeError)]:
+    check(f"tool_url refuses {label}", raises(fn, exc), exc.__name__)
 
 # ── widget pages ───────────────────────────────────────────────────────────
 print("pages")
