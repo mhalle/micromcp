@@ -196,7 +196,8 @@ if django:
     check("an unknown method is refused", call(method="TRACE", path="/app/list/")[:2], (True, 405))
     for p in ["/app/../secret/", "/app/%2e%2e/secret/", "/app/%2E%2E/secret/",
               "https://evil.example/app/list/", "//evil.example/app/list/", "/app\\..\\secret/",
-              "/secret/", "app/list/", "/app/list/\x00", "/ap"]:
+              "/secret/", "app/list/", "/app/list/\x00", "/ap", "/app/x%0d%0aSet-Cookie:a=b/",
+              "/app/list/%00", "/app/%ff/", "/app/list/?a=\r\n", "/app/\tlist/"]:
         check(f"path confined: {p!r}", call(method="GET", path=p)[:3],
               (True, 404, "path not served to MCP Apps"))
     check("a redirect off the host is refused", call(method="GET", path="/app/away/")[:2], (True, 502))
@@ -252,6 +253,17 @@ check("imports must be https URLs",
       "ValueError")
 check("imports must be a dict",
       raises(lambda: Widget("x", body="x", imports=["three"]), TypeError), "TypeError")
+check("a // comment is still inline source",
+      "<script>// setup\nwindow.a = 1;</script>" in Widget("x", body="x",
+                                                           scripts=["// setup\nwindow.a = 1;"]).html,
+      True)
+check("CSS with a pseudo-class is still inline source",
+      "<style>a:hover{color:red}</style>" in Widget("x", body="x", styles=["a:hover{color:red}"]).html,
+      True)
+check("csp takes subdomain wildcards, wss, and ports",
+      Widget("x", body="x", csp={"connectDomains": ["https://*.example.org",
+                                                    "wss://live.example.org:8443"]}).meta,
+      {"ui": {"csp": {"connectDomains": ["https://*.example.org", "wss://live.example.org:8443"]}}})
 check("html= is used verbatim", Widget("own", html="<p>mine</p>").html, "<p>mine</p>")
 check("no csp and no border means no resource meta", Widget("plain", body="x").meta, None)
 for label, make, exc in [
@@ -272,6 +284,22 @@ for label, make, exc in [
          ValueError),
         ("a style that closes its tag", lambda: Widget("x", body="x", styles=["a</style>"]), ValueError),
         ("a route that is not a tool name", lambda: Widget("x", body="x", route="no spaces!"), ValueError),
+        ("a URL with a trailing space",
+         lambda: Widget("x", body="x", scripts=["https://cdn.example.org/a.js "]), ValueError),
+        ("a URL with a quote",
+         lambda: Widget("x", body="x", scripts=['https://cdn.example.org/a.js?y="2']), ValueError),
+        ("a protocol-relative URL",
+         lambda: Widget("x", body="x", scripts=["//cdn.example.org/a.js"]), ValueError),
+        ("a URL with credentials",
+         lambda: Widget("x", body="x", scripts=["https://u:p@cdn.example.org/a.js"]), ValueError),
+        ("an import with credentials",
+         lambda: Widget("x", body="x", imports={"t": "https://u@cdn.example.org/t.js"}), ValueError),
+        ("a csp wildcard", lambda: Widget("x", body="x", csp={"connectDomains": ["*"]}), ValueError),
+        ("a csp entry carrying a directive",
+         lambda: Widget("x", body="x", csp={"resourceDomains": ["https://a.example; script-src *"]}),
+         ValueError),
+        ("a csp entry with another scheme",
+         lambda: Widget("x", body="x", csp={"frameDomains": ["javascript:alert(1)"]}), ValueError),
         ("a script of the wrong type", lambda: Widget("x", body="x", scripts=[42]), TypeError)]:
     check(f"Widget refused: {label}", raises(make, exc), exc.__name__)
 
@@ -430,6 +458,60 @@ taken.tool(lambda: 1, name="channel_open")
 check("a server whose tool names are taken refuses its first channel",
       (raises(lambda: Channel(taken, "x")), "channel_send" in taken.tools), ("ValueError", False))
 check("channels are per server", bool(Channel(MCP("other"), "room")), True)
+
+
+for label, kw in [("an infinite wait", {"wait": float("inf")}), ("a NaN wait", {"wait": float("nan")}),
+                  ("a NaN idle", {"idle": float("nan")}), ("zero max_bytes", {"max_bytes": 0}),
+                  ("zero max_connections", {"max_connections": 0})]:
+    check(f"Channel refuses {label}", raises(lambda kw=kw: Channel(MCP("limits"), "c", **kw)),
+          "ValueError")
+short = Channel(cm, "short", wait=0.3)
+s = ctool("channel_open", {"channel": "short"})["conn"]
+for label, w in [("NaN", float("nan")), ("Infinity", float("inf"))]:
+    t0 = time.monotonic()
+    ctool("channel_recv", {"conn": s, "wait": w})     # refused by the parser, or capped here
+    check(f"recv with wait={label} returns within the channel's cap", time.monotonic() - t0 < 1.5, True)
+t0 = time.monotonic()
+asyncio_run = __import__("asyncio").run
+asyncio_run([c for c in short.connections if c.id == s][0]._wait(float("nan")))
+check("a NaN wait does not wait", time.monotonic() - t0 < 0.2, True)
+
+fragile = Channel(cm, "fragile")
+gone = []
+
+
+@fragile.on_message
+def fragile_message(conn, text):
+    raise RuntimeError("db password is hunter2")
+
+
+@fragile.on_disconnect
+def fragile_left(conn):
+    gone.append(conn.id)
+
+
+f = ctool("channel_open", {"channel": "fragile"})["conn"]
+raw_send = crpc("tools/call", {"name": "channel_send", "arguments": {"conn": f, "data": "x"}})[1]
+check("an on_message that raises closes the connection",
+      raw_send["result"]["structuredContent"]["closed"], True)
+check("... without sending the exception to the client", "hunter2" in json.dumps(raw_send), False)
+check("... and runs on_disconnect", gone, [f])
+
+sized = Channel(cm, "sized", max_bytes=10)
+z = ctool("channel_open", {"channel": "sized"})["conn"]
+sized.broadcast("12345")
+sized.broadcast("é1234")                 # 6 bytes in UTF-8: over the 10-byte budget
+r = ctool("channel_recv", {"conn": z, "wait": 0})
+check("a connection over max_bytes (UTF-8) is closed after what fit",
+      (r["frames"], r["closed"]), (["12345"], True))
+
+few = Channel(cm, "few", max_connections=2)
+k1 = ctool("channel_open", {"channel": "few"})["conn"]
+k2 = ctool("channel_open", {"channel": "few"})["conn"]
+check("an open beyond max_connections is refused",
+      ctool("channel_open", {"channel": "few"})["conn"], None)
+ctool("channel_close", {"conn": k1})
+check("... until one closes", bool(ctool("channel_open", {"channel": "few"})["conn"]), True)
 
 print(f"\n{OK} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
