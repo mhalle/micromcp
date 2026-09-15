@@ -59,7 +59,11 @@ tool you register yourself, `board.register(mcp)` publishes the resource and
 Assets in `scripts=`, `modules=`, and `styles=` are source text,
 `pathlib.Path`s (inlined), or https URLs (loaded; their origins are declared
 in the resource's `_meta.ui.csp.resourceDomains` for you). Scripts and
-modules follow the body, so they can reach its elements. Claude enforces the
+modules follow the body, so they can reach its elements. A string that looks
+like a URL but is not a clean one (a stray space or quote, credentials, a
+protocol-relative `//host/...`) is refused rather than inlined as source, and
+`csp=` entries must be plain origins (`https://api.example.com`,
+`https://*.example.com`, `wss://live.example.com:8443`). Claude enforces the
 declaration: on 2026-09-14 htmx loaded from jsdelivr in a `Widget`, and the
 same page without the declaration was blocked (`script-src-elem`), exactly
 as in the dev host. `imports=` writes an import map, so modules can
@@ -149,6 +153,12 @@ array of blocks (the spec shows one block), so the bridge tries that first.
 None of this happens in the Claude Code desktop tab, which does not render MCP
 Apps. Treat context as data: anything users wrote reaches the model.
 
+The bridge acts on attributes anywhere in the page, including HTML swapped in
+later: a click on any `data-mcp-say` element posts its text as the user, and
+htmx and fixi issue tool calls from `hx-*`/`data-hx-*`/`fx-*` attributes. So
+never swap in user-authored HTML, even sanitized: common sanitizers keep
+`data-*` attributes by default. Escape user text into your templates instead.
+
 ## Channels: pushing to open widgets
 
 A widget cannot open a socket, and the host delivers a tool result only to the
@@ -188,8 +198,12 @@ returns as soon as a frame is queued, or after `wait` seconds (20 by default),
 so an idle widget makes one request per 20 s and a change arrives at once. A
 connection is bound to the principal that opened it (`guards=` run on open),
 is dropped after `idle` seconds without a request (90), and is closed if it
-falls `max_queue` frames behind (1000). Callbacks may be sync (run on a worker
-thread) or async, and `send`/`broadcast` are safe from any thread.
+falls `max_queue` frames (1000) or `max_bytes` (16 MiB) behind. A channel
+holds at most `max_connections` (1000); further opens are refused until some
+close or time out. Callbacks may be sync (run on a worker thread) or async,
+and `send`/`broadcast` are safe from any thread. A callback that raises is
+logged and its connection closed: the widget sees the socket close, never the
+exception text.
 
 Channels live in one process: with several workers or replicas, a widget's
 requests must reach the process holding its connection, and a broadcast

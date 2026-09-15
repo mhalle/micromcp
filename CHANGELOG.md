@@ -55,6 +55,15 @@
   hypermedia headers forwarded, JSON bodies); `set_mcp_context(response,
   text, data)`.
 - `DEVHOST_HTML`, a development MCP Apps host page.
+- Hardening from adversarial tests: channels cap queued bytes per connection
+  (`max_bytes`, 16 MiB) and open connections per channel (`max_connections`,
+  1000), sweep idle connections at most every second, ignore non-finite
+  `wait` values, and close a connection whose `on_message` raises (logged,
+  never echoed to the client). `Widget` refuses near-miss URLs instead of
+  inlining them as source, URLs with credentials, and `csp=` entries that are
+  not plain origins. `django_routes` refuses control characters and invalid
+  UTF-8 in paths. The README warns against swapping user-authored HTML into a
+  widget.
 - Examples in `apps/examples/`: `mcp_app_3d.py` (a shared three.js scene the
   model builds and the user selects in), `mcp_app_hypermedia.py` (todo widget
   with tools and with Django views), `toolkit_lab.py` (nine self-testing

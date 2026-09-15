@@ -29,6 +29,7 @@ _METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
 _CTYPES = frozenset({"", "application/x-www-form-urlencoded", "application/json"})
 _FORWARD_RE = re.compile(r"^(hx|fx|datastar)-[a-z0-9-]{1,64}$")
 _REDIRECTS = frozenset({301, 302, 303, 307, 308})
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def django_routes(mcp, *, prefixes, name: str = "django_http", host: str = "localhost",
@@ -72,13 +73,16 @@ def django_routes(mcp, *, prefixes, name: str = "django_http", host: str = "loca
     def clean(path):
         """(decoded normalized path, query), or None when outside the prefixes."""
         if not isinstance(path, str) or not path.startswith("/") or path.startswith("//") \
-                or "\\" in path or len(path) > 2048:
+                or "\\" in path or len(path) > 2048 or _CONTROL_RE.search(path):
             return None
         parts = urlsplit(path)
         if parts.scheme or parts.netloc:
             return None
-        decoded = unquote(parts.path)
-        if "\x00" in decoded:
+        try:
+            decoded = unquote(parts.path, errors="strict")    # invalid UTF-8 is refused
+        except UnicodeDecodeError:
+            return None
+        if _CONTROL_RE.search(decoded):                        # NUL, CR/LF, and the rest
             return None
         norm = posixpath.normpath(decoded)
         if decoded.endswith("/") and not norm.endswith("/"):

@@ -48,6 +48,22 @@ _HTTPS_RE = re.compile(r"https://[^\s\"'<>]+")
 _PATHLIKE_RE = re.compile(r"[\w./-]+\.(?:m?js|css)")
 _WIDGET_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 _CSP_KEYS = ("connectDomains", "resourceDomains", "frameDomains", "baseUriDomains")
+# An origin the way a host's CSP takes it: scheme, host (optionally *.-prefixed), optional port.
+_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
+_ORIGIN_RE = re.compile(rf"(?:https?|wss?)://(?:\*\.)?{_LABEL}(?:\.{_LABEL})*(?::[0-9]{{1,5}})?")
+# A string that was meant as a URL, so must not be inlined as source: it starts with http(s):,
+# or it is a lone protocol-relative URL. A `// comment` line and CSS such as `a:hover` do not.
+_URLISH_RE = re.compile(r"\s*(?:https?:|//[\w-]+\.[\w.-]+(?:[/?#]\S*)?\s*$)", re.I)
+
+
+def _origin(url, what):
+    """The origin of an asset URL, refused unless it is a plain one (no credentials,
+    nothing a host could mistake for a CSP directive)."""
+    u = urlsplit(url)
+    origin = f"{u.scheme}://{u.netloc}"
+    if "@" in u.netloc or not _ORIGIN_RE.fullmatch(origin):
+        raise ValueError(f"{what} {url!r}: its origin {origin!r} is not a plain host[:port]")
+    return origin
 
 
 def _items(value):
@@ -62,10 +78,13 @@ def _asset(item, what):
     if not isinstance(item, str):
         raise TypeError(f"{what} must be source text, a pathlib.Path, or an https URL")
     if _HTTPS_RE.fullmatch(item):
-        u = urlsplit(item)
-        return item, f"{u.scheme}://{u.netloc}"
+        return item, _origin(item, what)
     if item.startswith("http://"):
         raise ValueError(f"{what} {item!r}: widgets load only https URLs")
+    if _URLISH_RE.match(item):
+        raise ValueError(f"{what} {item!r} looks like a URL but is not a usable one: widgets "
+                         f"load https URLs with no spaces or quotes (anything else is inlined "
+                         f"as source text)")
     if _PATHLIKE_RE.fullmatch(item):
         raise ValueError(f"{what} {item!r} looks like a file name; pass pathlib.Path({item!r}) "
                          f"to inline the file, or an https URL to load it")
@@ -110,8 +129,7 @@ def _document(body, *, title, head, scripts, modules, styles, route, fetch, impo
             if not isinstance(spec, str) or not spec or not isinstance(url, str) \
                     or not _HTTPS_RE.fullmatch(url):
                 raise ValueError(f"imports[{spec!r}] must be an https URL, got {url!r}")
-            u = urlsplit(url)
-            origins.add(f"{u.scheme}://{u.netloc}")
+            origins.add(_origin(url, f"imports[{spec!r}]"))
         parts.append('<script type="importmap">'
                      + json.dumps({"imports": imports}).replace("</", "<\\/") + "</script>")
     parts.append(_script(BRIDGE_JS))
@@ -197,8 +215,10 @@ class Widget:
         for k, v in (csp or {}).items():
             if k not in _CSP_KEYS:
                 raise ValueError(f"csp key {k!r}; expected one of {', '.join(_CSP_KEYS)}")
-            if isinstance(v, str) or not all(isinstance(d, str) and d for d in v):
-                raise ValueError(f"csp {k} must be a list of origins")
+            if isinstance(v, str) or not all(isinstance(d, str) and _ORIGIN_RE.fullmatch(d)
+                                             for d in v):
+                raise ValueError(f"csp {k} must be a list of origins such as "
+                                 f"https://api.example.com or https://*.example.com")
             domains[k] = list(v)
         if origins:
             domains["resourceDomains"] = sorted(set(domains.get("resourceDomains", ())) | origins)
