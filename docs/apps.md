@@ -109,6 +109,80 @@ yourself (`html.escape`). Scripts and styles belong in `scripts=` and
 `styles=`: `fastcore.xml`'s `Script` and `Style` escape their text
 (`a && b` arrives as `a &amp;&amp; b`), unlike `fasthtml.common`'s.
 
+## Bundling widgets: Vite, Bun, esbuild
+
+A widget is one HTML document with no origin of its own, so the host cannot
+fetch anything it refers to by a relative URL: a bundler's split chunks,
+hashed asset files, and `public/` files all fail silently in the frame. Give
+micromcp either one script and one stylesheet, or one complete page, with
+everything else inlined (or loaded from an https URL).
+
+**One module and one stylesheet; micromcp writes the page.** The page then
+carries the bridge, so the app calls `mcp.callTool(...)`,
+`mcp.setContext(...)`, and `mcp.channel(...)`. With Vite (checked with 8.3):
+
+```js
+// vite.config.js
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  build: {
+    target: "es2022",                 // top-level await, if the app uses it
+    cssCodeSplit: false,
+    assetsInlineLimit: 100_000_000,   // images and fonts become data: URLs
+    rollupOptions: {
+      input: "src/main.ts",           // no index.html: micromcp writes the page
+      output: {
+        codeSplitting: false,         // one file (before Vite 8: inlineDynamicImports: true)
+        entryFileNames: "widget.js",
+        assetFileNames: "widget.[ext]",
+      },
+    },
+  },
+});
+```
+
+```python
+UI = Path(__file__).parent / "ui" / "dist"
+chart = Widget("chart", title="Chart", body='<div id="root"></div>',
+               modules=[UI / "widget.js"], styles=[UI / "widget.css"])
+```
+
+For TypeScript, `BRIDGE_TYPES` declares `window.mcp`:
+
+```sh
+python -c "from micromcp.apps import BRIDGE_TYPES; print(BRIDGE_TYPES)" > src/mcp-bridge.d.ts
+```
+
+**One complete page.** A single-file build (Vite with `vite-plugin-singlefile`,
+say) is used verbatim: `Widget("chart", html=Path("ui/dist/index.html"))`.
+Such a page brings its own bridge, typically the official MCP Apps client
+(`@modelcontextprotocol/ext-apps`); or add `bridge=True` to put micromcp's
+first in its head (`route=` and `fetch=` then apply). Use one bridge per page,
+never both.
+
+**What micromcp checks when the widget is built.** A page that loads a
+relative URL is refused, with the URL and where it appears: `src`, `href`,
+and `srcset` on elements that load (scripts, stylesheets and preloads, images,
+media, frames), `url()` and `@import` in styles, and import maps. Links,
+hypermedia attributes, and `<link rel="icon">` are not loads, and a page with
+an https `<base href>` is not checked. Relative imports and asset paths inside
+inline scripts are only logged, since they may be mere strings. An inlined
+script containing `</script` is refused; `escape_scripts=True` rewrites it as
+`<\/script`, as bundlers do. Files are read when the `Widget` is built, so
+restart the server after a rebuild, and remember that hosts cache a widget per
+connector.
+
+**Bun (checked with 1.4.0)** bundles code and CSS into one file each, quickly
+(`bun build src/main.ts --outdir dist --minify --entry-naming "[name].[ext]"
+--asset-naming "[name].[ext]"`), but it does not yet inline everything: images
+imported from scripts become separate files (refused as relative URLs) or,
+with the `dataurl` loader, empty strings; images in CSS are inlined only with
+the default loader; and `</script` in strings is left raw (use
+`escape_scripts=True`). Keep a Bun-built widget's images in CSS, or use Vite.
+Other bundlers need the same three things: one output file, assets as data
+URLs, and names without hashes.
+
 ## Hypermedia widgets: htmx, fixi, Django views
 
 A widget can be a static page whose HTML the server renders: every click

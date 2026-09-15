@@ -78,6 +78,15 @@
 - `tool_url(name, **args)` builds a `tool:` URL with percent-encoded
   arguments, so user text in a value can neither add arguments nor change
   others (an f-string URL lets `milk&role=admin` add one).
+- Bundled widgets: `Widget(html=Path(...))` reads a complete page from a file
+  (`body=` takes a path too), and `bridge=True` puts the bridge first in its
+  head, with `route=`/`fetch=`. A page that loads a relative URL, which a
+  widget cannot fetch, is refused when the widget is built (`src`/`href`/
+  `srcset` on loading elements, `url()`/`@import` in styles, import maps;
+  relative paths inside inline scripts are logged); an https `<base href>`
+  exempts it. `escape_scripts=True` rewrites `</script` in inlined scripts
+  instead of refusing them. `BRIDGE_TYPES` declares `window.mcp` for
+  TypeScript. `docs/apps.md` covers Vite (checked with 8.3) and Bun.
 - Model context: `fragment(context=)` and `mcp.setContext()` send
   `ui/update-model-context` (text plus data as a labeled JSON block);
   `mcp.say()` and `data-mcp-say` send `ui/message`.

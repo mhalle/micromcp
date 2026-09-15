@@ -32,15 +32,15 @@ from __future__ import annotations
 import pathlib
 
 from .channels import CHANNEL_IDLE, CHANNEL_QUEUE, CHANNEL_WAIT, Channel, Connection
-from .widget import (BRIDGE_JS, CONTEXT_LIMIT, CONTEXT_META, FRAGMENT_META, SupportsHTML,
-                     Widget, fragment, page, tool_url)
+from .widget import (BRIDGE_JS, BRIDGE_TYPES, CONTEXT_LIMIT, CONTEXT_META, FRAGMENT_META,
+                     SupportsHTML, Widget, fragment, page, tool_url)
 
 
 DEVHOST_HTML = pathlib.Path(__file__).with_name("devhost.html").read_bytes()
 
 __all__ = [
     "Widget", "fragment", "page", "tool_url", "SupportsHTML",
-    "Channel", "Connection", "BRIDGE_JS", "DEVHOST_HTML",
+    "Channel", "Connection", "BRIDGE_JS", "BRIDGE_TYPES", "DEVHOST_HTML",
     "CONTEXT_META", "FRAGMENT_META", "CONTEXT_LIMIT", "CHANNEL_WAIT", "CHANNEL_IDLE",
     "CHANNEL_QUEUE",
 ]

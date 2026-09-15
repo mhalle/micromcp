@@ -20,8 +20,8 @@ except ModuleNotFoundError:            # the single-file bundle carries only the
     sys.exit(0)
 
 from micromcp import META_CAPS, META_SERVER, META_VER, MCP, PROTOCOL, Server
-from micromcp.apps import (BRIDGE_JS, CONTEXT_META, Channel, SupportsHTML, Widget, fragment,
-                           page, tool_url)
+from micromcp.apps import (BRIDGE_JS, BRIDGE_TYPES, CONTEXT_META, Channel, SupportsHTML, Widget,
+                           fragment, page, tool_url)
 from micromcp.apps.django import django_routes, set_mcp_context
 
 OK = FAIL = 0
@@ -234,6 +234,80 @@ for label, fn, exc in [("a bad tool name", lambda: tool_url("a b"), ValueError),
                        ("a dict value", lambda: tool_url("t", x={"a": 1}), TypeError),
                        ("a bool value", lambda: tool_url("t", x=True), TypeError)]:
     check(f"tool_url refuses {label}", raises(fn, exc), exc.__name__)
+
+# ── bundled widgets ────────────────────────────────────────────────────────
+print("bundled widgets")
+import logging  # noqa: E402
+
+bundle_dir = pathlib.Path(tempfile.mkdtemp())
+(bundle_dir / "index.html").write_text(
+    '<!doctype html><html><head><title>t</title></head><body><div id="root"></div>'
+    '<script type="module">window.built = 1</script></body></html>')
+(bundle_dir / "body.html").write_text('<div id="root"></div>')
+w = Widget("bundled", html=bundle_dir / "index.html")
+check("html= takes a path to a complete page", '<div id="root"></div>' in w.html, True)
+check("... used verbatim, without the bridge", BRIDGE_JS in w.html, False)
+doc = Widget("bridged", html=bundle_dir / "index.html", bridge=True, route="django_http",
+             fetch="global").html
+check("bridge=True puts the bridge first in the head",
+      doc.index("<head>") < doc.index(BRIDGE_JS) < doc.index("<title>"), True)
+check("... after its route and fetch settings",
+      doc.index('name="mcp-route"') < doc.index('name="mcp-fetch"') < doc.index(BRIDGE_JS), True)
+check("a page without a head gets the bridge too",
+      BRIDGE_JS in Widget("headless", html="<p>x</p>", bridge=True).html, True)
+check("bridge=True refuses a page that already has the bridge",
+      raises(lambda: Widget("twice", html=doc, bridge=True)), "ValueError")
+check("route= with html= needs bridge=True",
+      raises(lambda: Widget("r", html="<p>x</p>", route="django_http"), TypeError), "TypeError")
+check("bridge= is for html= pages",
+      raises(lambda: Widget("b", body="<p>x</p>", bridge=True), TypeError), "TypeError")
+check("body= takes a path too",
+      '<div id="root"></div>' in Widget("bp", body=bundle_dir / "body.html").html, True)
+for label, kw in [
+        ("a script src", {"html": '<script src="/assets/index-a1b2.js"></script>'}),
+        ("a stylesheet link", {"html": '<link rel="stylesheet" href="./widget.css">'}),
+        ("a modulepreload link", {"html": '<link rel="modulepreload" href="/assets/chunk.js">'}),
+        ("an img src", {"body": '<img src="logo.png">'}),
+        ("an img srcset", {"body": '<img srcset="data:image/png;base64,AAAA 1x, logo@2x.png 2x">'}),
+        ("a url() in styles=", {"body": "<p>x</p>", "styles": ["#root{background:url(./logo.svg)}"]}),
+        ("an @import in styles=", {"body": "<p>x</p>", "styles": ['@import "./base.css";']}),
+        ("a url() in a style attribute", {"body": "<div style=\"background: url('img/bg.png')\"></div>"}),
+        ("an import map", {"html": '<script type="importmap">{"imports": {"x": "./x.js"}}</script>'}),
+        ("a protocol-relative src", {"body": '<img src="//cdn.example.com/x.png">'})]:
+    check(f"a relative URL in {label} is refused", raises(lambda k=kw: Widget("rel", **k)), "ValueError")
+for label, kw in [
+        ("data: and https: URLs", {"body": '<img src="data:image/png;base64,AAAA">'
+                                           '<img src="https://cdn.example.com/x.png">'}),
+        ("links, fragments, and hypermedia attributes",
+         {"body": '<a href="/docs">docs</a><svg><use href="#icon"/></svg>'
+                  '<button hx-get="/app/todos/" fx-action="/x">go</button>'}),
+        ("an icon link", {"html": '<link rel="icon" href="/vite.svg"><p>x</p>'}),
+        ("an https base", {"html": '<head><base href="https://cdn.example.com/app/"></head>'
+                                   '<script src="assets/x.js"></script>'})]:
+    check(f"{label}: accepted", raises(lambda k=kw: Widget("fine", **k)), None)
+heard = []
+
+
+class Heard(logging.Handler):
+    def emit(self, record):
+        heard.append(record.getMessage())
+
+
+logging.getLogger("micromcp.apps").addHandler(Heard())
+Widget("warned", body="<p>x</p>",
+       modules=['const logo = "./logo.svg"; await import("./chunk-a1.js");'])
+check("relative paths inside a script are logged, not refused",
+      [("./logo.svg" in m, "./chunk-a1.js" in m) for m in heard if "'warned'" in m], [(True, True)])
+check("an inlined script with </script is refused by default",
+      raises(lambda: Widget("s", body="<p>x</p>", modules=['window.t = "</SCRIPT>";'])),
+      "ValueError")
+escaped = Widget("s2", body="<p>x</p>", modules=['window.t = "</SCRIPT>";'],
+                 escape_scripts=True).html
+check("escape_scripts=True rewrites it as <\\/script", 'window.t = "<\\/SCRIPT>";' in escaped, True)
+check("... leaving one end tag per script element",
+      escaped.lower().count("</script>"), escaped.lower().count("<script"))
+check("BRIDGE_TYPES declares window.mcp",
+      ("interface MCPBridge" in BRIDGE_TYPES, "var mcp: MCPBridge" in BRIDGE_TYPES), (True, True))
 
 # ── widget pages ───────────────────────────────────────────────────────────
 print("pages")
