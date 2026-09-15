@@ -42,7 +42,7 @@ def show_todos() -> str:
 
 @mcp.tool(visibility="app")               # the widget calls this; the model never sees it
 def todo_list():
-    return fragment(render(todos))        # HTML for the widget; escape what you interpolate
+    return fragment(render(todos))        # HTML for the widget: a str or components
 ```
 
 `Widget(name, ...)` builds the page around `BRIDGE_JS`, or takes `html=` for
@@ -72,6 +72,29 @@ user selects in). `csp=` adds origins, `border=` sets `prefersBorder`,
 Widgets must be static: hosts fetch a `ui://` resource under their own
 identity and cache it per connector, so per-user data belongs in tool results
 and fragments (see the core README's UI apps section).
+
+## Writing the HTML
+
+`fragment()`, `page()`, and `Widget(body=, head=, html=)` take a str or any
+object that renders itself through `__html__`, the protocol Jinja and
+markupsafe use: FastHTML's components (`fastcore.xml`, which has no
+dependencies of its own, or `fasthtml.common`), htpy elements, and
+`markupsafe.Markup`. Those libraries escape the text you put in them, so
+user-written data goes straight in:
+
+```python
+from fastcore.xml import Button, Div, Li, Span, Ul
+
+def render(todos):
+    return Div(Ul(*[Li(Button("done", hx_post=f"tool:todo_toggle?id={t.id}", hx_target="#app"),
+                       Span(t.text))                 # t.text is escaped
+                    for t in todos]))
+```
+
+Pass one object, so wrap siblings in an element. It is rendered once, when
+the page or fragment is built, and its output is trusted as markup, exactly
+as Jinja trusts it. A str is used as is: escape what you interpolate into one
+yourself (`html.escape`).
 
 ## Hypermedia widgets: htmx, fixi, Django views
 
@@ -235,8 +258,9 @@ with tools and with Django views, the toolkit lab, and the context counter).
 
 ## Examples
 
-- `examples/mcp_app_hypermedia.py`: the todo widget with app-only tools and
-  with Django views, plus the toolkit lab and the dev host
+- `examples/mcp_app_hypermedia.py`: the todo widget rendered with FastHTML
+  components by app-only tools, and by Django views, plus the toolkit lab and
+  the dev host
 - `examples/toolkit_lab.py`: nine self-testing toolkit variants and a
   model-context counter
 - `examples/mcp_app_3d.py`: a shared three.js scene over a channel
