@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+### Core
 - Requests carrying `NaN`, `Infinity`, or a number that overflows to
   infinity are refused as parse errors (`400`/`-32700`). JSON has no such
   values, but Python's parser accepts them, so they used to reach handlers
@@ -13,10 +14,6 @@
   `log` are still importable from `micromcp` by name (only
   `from micromcp import *` no longer brings them in) and are documented in
   the README's new "Constants" section.
-
-## Unreleased (branch `apps-hypermedia`)
-
-### Core
 - `@mcp.tool(visibility="app" | "model" | [...])` publishes
   `_meta.ui.visibility`; app-only tools are hidden from the model by the host
   and callable by the server's widgets. New suite `tests/test_ui.py`.
