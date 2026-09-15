@@ -27,10 +27,12 @@ from __future__ import annotations
 
 import html as _html
 import json
+import logging
 import os
 import pathlib
 import re
 import weakref
+from html.parser import HTMLParser
 from typing import Any, Protocol
 from urllib.parse import quote, urlencode, urlsplit
 
@@ -43,6 +45,10 @@ CONTEXT_META = "micromcp/context"
 CONTEXT_LIMIT = 16_000     # bytes of JSON: context rides along on the model's later turns
 
 BRIDGE_JS = (pathlib.Path(__file__).with_name("bridge.js")).read_text(encoding="utf-8")
+# TypeScript declarations for `window.mcp`, to copy into a bundled widget's project.
+BRIDGE_TYPES = (pathlib.Path(__file__).with_name("bridge.d.ts")).read_text(encoding="utf-8")
+
+log = logging.getLogger("micromcp.apps")
 
 
 _HTTPS_RE = re.compile(r"https://[^\s\"'<>]+")
@@ -92,9 +98,19 @@ def _asset(item, what):
     return item, None
 
 
-def _script(source, module=False):
-    if "</script" in source.lower():
-        raise ValueError("an inlined script contains '</script'; it would end the tag early")
+_SCRIPT_END_RE = re.compile(r"</(script)", re.I)
+
+
+def _script(source, module=False, escape=False):
+    """An inline script element. `</script` inside the source would end the
+    element early: it is refused, or with `escape` rewritten as `<\\/script`,
+    which means the same in the strings, templates, and regular expressions
+    where it occurs (bundlers such as Vite emit it that way)."""
+    if escape:
+        source = _SCRIPT_END_RE.sub(r"<\\/\1", source)
+    elif "</script" in source.lower():
+        raise ValueError("an inlined script contains '</script'; it would end the tag early "
+                         "(escape_scripts=True rewrites it as '<\\/script', as bundlers do)")
     kind = ' type="module"' if module else ""
     return f"<script{kind}>{source}</script>"
 
@@ -161,22 +177,177 @@ def tool_url(name: str, /, **args) -> str:
     return f"tool:{name}?{query}" if query else f"tool:{name}"
 
 
-def _document(body, *, title, head, scripts, modules, styles, route, fetch, imports=None):
-    """The widget page and the https origins it loads from."""
-    body, head = _markup(body, "body"), _markup(head, "head")
-    if not issubclass(type(title), str):
-        raise TypeError("title must be a str")
-    title = str.__str__(title)           # plain text: a Markup title would be escaped twice
+# ── pages from bundlers ─────────────────────────────────────────────────────
+
+def _read(value):
+    """A page argument given as a path is the file's text."""
+    if isinstance(value, os.PathLike):
+        return pathlib.Path(value).read_text(encoding="utf-8")
+    return value
+
+
+def _bridge_parts(route, fetch) -> list:
+    """The bridge's settings, as the meta elements it reads."""
     if fetch not in ("hooks", "global"):
         raise ValueError("fetch must be 'hooks' (htmx, fixi) or 'global' (replace window.fetch)")
     if route is not None and (not isinstance(route, str) or not _NAME_RE.match(route)):
         raise ValueError(f"route must be a tool name, got {route!r}")
-    origins = set()
-    parts = ['<meta charset="utf-8">', f"<title>{_html.escape(title)}</title>"]
+    parts = []
     if route:
         parts.append(f'<meta name="mcp-route" content="{_html.escape(route)}">')
     if fetch == "global":
         parts.append('<meta name="mcp-fetch" content="global">')
+    return parts
+
+
+_HEAD_RE = re.compile(r"<head\b[^>]*>", re.I)
+_HTML_RE = re.compile(r"<html\b[^>]*>", re.I)
+_DOCTYPE_RE = re.compile(r"\s*<!doctype[^>]*>", re.I)
+
+
+def _with_bridge(doc, route, fetch) -> str:
+    """A complete document with the bridge, and its settings, first in its head."""
+    if BRIDGE_JS in doc:
+        raise ValueError("html already carries micromcp's bridge; leave bridge=True off")
+    prelude = "".join(_bridge_parts(route, fetch)) + _script(BRIDGE_JS)
+    m = _HEAD_RE.search(doc) or _HTML_RE.search(doc) or _DOCTYPE_RE.match(doc)
+    at = m.end() if m else 0
+    return doc[:at] + prelude + doc[at:]
+
+
+# Attributes whose URL a page loads, by element. `a`, `form`, and hypermedia
+# attributes (hx-get, fx-action) navigate or go through the bridge; they are not loads.
+_LOADING = {"script": ("src",), "img": ("src", "srcset"), "source": ("src", "srcset"),
+            "video": ("src", "poster"), "audio": ("src",), "track": ("src",),
+            "iframe": ("src",), "embed": ("src",), "object": ("data",), "input": ("src",),
+            "image": ("href", "xlink:href"), "use": ("href", "xlink:href"),
+            "feimage": ("href", "xlink:href")}
+_LINK_LOADS = {"stylesheet", "modulepreload", "preload"}   # a missing icon breaks nothing
+_SCHEME_RE = re.compile(r"[a-z][a-z0-9+.-]*:", re.I)
+_CSS_URL_RE = re.compile(r"""url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\)"""
+                         r"""|@import\s+["']([^"']*)["']""", re.I)
+_JS_IMPORT_RE = re.compile(r"""(?:\bfrom|\bimport)\s*\(?\s*["']((?:\.{1,2})?/[^"'\s]*)["']""")
+_JS_META_URL_RE = re.compile(r"""\bnew\s+URL\(\s*["']([^"']+)["']\s*,\s*import\.meta\.url""")
+_JS_ASSET_RE = re.compile(r"""["'](\.{1,2}/[\w./@%+-]+\.(?:png|jpe?g|gif|svg|webp|avif|ico|"""
+                          r"""bmp|woff2?|ttf|otf|eot|css|m?js|json|wasm|mp3|mp4|webm|ogg|wav))["']""",
+                          re.I)
+
+
+def _relative(url) -> bool:
+    url = url.strip()
+    return bool(url) and not url.startswith("#") and not _SCHEME_RE.match(url)
+
+
+def _srcset(value) -> list:
+    """The URLs of a srcset: comma-separated candidates, each a URL and then
+    optional descriptors (a data: URL may itself contain a comma)."""
+    urls, rest = [], value
+    while True:
+        rest = rest.lstrip(" \t\n\r\f,")
+        if not rest:
+            return urls
+        url = re.match(r"\S+", rest).group(0)
+        rest = rest[len(url):]
+        if url.endswith(","):
+            url = url.rstrip(",")
+        else:
+            k = rest.find(",")
+            rest = "" if k < 0 else rest[k + 1:]
+        urls.append(url)
+
+
+def _css_urls(css) -> list:
+    return [next(g for g in m.groups() if g is not None) for m in _CSS_URL_RE.finditer(css)]
+
+
+class _Loads(HTMLParser):
+    """The URLs a page loads (with where they appear), its `<base href>`,
+    its import maps, and the text of its inline scripts."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.base, self.loads, self.scripts, self._open, self._buf = None, [], [], None, []
+
+    def handle_starttag(self, tag, attrs):
+        a = {k: v for k, v in attrs if v is not None}
+        if tag == "base" and "href" in a and self.base is None:
+            self.base = a["href"].strip()
+        names = _LOADING.get(tag, ())
+        if tag == "link" and set(a.get("rel", "").lower().split()) & _LINK_LOADS:
+            names = ("href", "imagesrcset")
+        for name in names:
+            if a.get(name):
+                for url in (_srcset(a[name]) if name.endswith("srcset") else [a[name]]):
+                    self.loads.append((url, f"<{tag} {name}>"))
+        for url in _css_urls(a.get("style", "")):
+            self.loads.append((url, f"<{tag} style>"))
+        if tag in ("script", "style"):
+            self._open, self._buf = (tag, a.get("type", "").strip().lower()), []
+
+    def handle_data(self, data):
+        if self._open:
+            self._buf.append(data)
+
+    def handle_endtag(self, tag):
+        if not self._open or tag != self._open[0]:
+            return
+        (kind, kind_type), text, self._open = self._open, "".join(self._buf), None
+        if kind == "style":
+            self.loads += [(url, "<style>") for url in _css_urls(text)]
+        elif kind_type == "importmap":
+            try:
+                spec = json.loads(text)
+            except ValueError:
+                return
+            maps = [spec.get("imports") or {}, *(spec.get("scopes") or {}).values()]
+            self.loads += [(url, "<script type=importmap>") for m in maps if isinstance(m, dict)
+                           for url in m.values() if isinstance(url, str)]
+        elif kind_type in ("", "module", "text/javascript", "application/javascript"):
+            self.scripts.append(text)
+
+
+def _check_urls(doc, what):
+    """Refuse a page that loads a relative URL: a widget is a document with no
+    origin, so the host cannot fetch it (a bundler's split chunks, hashed
+    assets, and `public/` files all end up this way). Relative paths inside
+    inline scripts are only logged, since they may be mere strings. A page with
+    an https `<base href>` resolves relative URLs against it and is not checked."""
+    parser = _Loads()
+    try:
+        parser.feed(doc)
+        parser.close()
+    except Exception:                    # an unparsable page is the host's problem to show
+        return
+    if parser.base and parser.base.lower().startswith("https://"):
+        return
+    bad = [(url, where) for url, where in parser.loads if _relative(url)]
+    if bad:
+        url, where = bad[0]
+        more = f" (and {len(bad) - 1} more)" if len(bad) > 1 else ""
+        raise ValueError(f"{what} loads {url!r} ({where}){more}, a relative URL, and a widget "
+                         f"has no origin to load it from: inline it (data: URLs, or "
+                         f"scripts=/styles= with a pathlib.Path) or load it from an https URL. "
+                         f"See 'Bundling widgets' in docs/apps.md")
+    for source in parser.scripts:
+        refs = {m.group(1) for m in _JS_IMPORT_RE.finditer(source)}
+        refs |= {m.group(1) for m in _JS_META_URL_RE.finditer(source) if _relative(m.group(1))}
+        refs |= {m.group(1) for m in _JS_ASSET_RE.finditer(source)}
+        if refs:
+            log.warning("%s: an inline script refers to %s, relative paths a widget cannot "
+                        "load (ignore this if they are only strings)", what,
+                        ", ".join(sorted(refs)[:5]) + (" ..." if len(refs) > 5 else ""))
+
+
+def _document(body, *, title, head, scripts, modules, styles, route, fetch, imports=None,
+              escape_scripts=False):
+    """The widget page and the https origins it loads from."""
+    body, head = _markup(_read(body), "body"), _markup(head, "head")
+    if not issubclass(type(title), str):
+        raise TypeError("title must be a str")
+    title = str.__str__(title)           # plain text: a Markup title would be escaped twice
+    settings = _bridge_parts(route, fetch)
+    origins = set()
+    parts = ['<meta charset="utf-8">', f"<title>{_html.escape(title)}</title>", *settings]
     for item in _items(styles):
         text, origin = _asset(item, "style")
         if origin:
@@ -209,14 +380,14 @@ def _document(body, *, title, head, scripts, modules, styles, route, fetch, impo
                 kind = ' type="module"' if module else ""
                 tail.append(f'<script{kind} src="{_html.escape(text)}"></script>')
             else:
-                tail.append(_script(text, module))
+                tail.append(_script(text, module, escape_scripts))
     return ("<!doctype html><html><head>" + "".join(parts) + "</head><body>" + body
             + "".join(tail) + "</body></html>"), origins
 
 
 def page(body: HTMLLike, *, title: str = "", head: HTMLLike = "",
          scripts=(), modules=(), styles=(), imports: dict | None = None,
-         route: str | None = None, fetch: str = "hooks") -> str:
+         route: str | None = None, fetch: str = "hooks", escape_scripts: bool = False) -> str:
     """A complete widget document around `body`: `styles`, `head`, the
     `imports` map and `BRIDGE_JS` in the head, then `body`, then `scripts` and
     `modules` in order, so a script can reach the page's elements. Each
@@ -226,9 +397,12 @@ def page(body: HTMLLike, *, title: str = "", head: HTMLLike = "",
     so modules can `import ... from "three"`. `route` names the tool that
     serves non-`tool:` URLs; `fetch="global"` lets libraries without a hook
     (Datastar) reach tools through `window.fetch`. `body` and `head` are a
-    str or an object with `__html__`, as for `fragment`. Most code wants `Widget`."""
+    str or an object with `__html__`, as for `fragment`; `body` may also be a
+    path. `escape_scripts=True` rewrites `</script` inside inlined scripts as
+    `<\\/script` instead of refusing them. Most code wants `Widget`."""
     return _document(body, title=title, head=head, scripts=scripts, modules=modules,
-                     styles=styles, route=route, fetch=fetch, imports=imports)[0]
+                     styles=styles, route=route, fetch=fetch, imports=imports,
+                     escape_scripts=escape_scripts)[0]
 
 
 class Widget:
@@ -240,16 +414,20 @@ class Widget:
 
     name     the resource is `ui://<name>` unless `uri=` says otherwise
     title    the page title and the resource title
-    body / scripts / modules / styles / imports / head / route / fetch
+    body / scripts / modules / styles / imports / head / route / fetch / escape_scripts
              build the page with `page()`; https URLs among the assets and the
              import map become `csp.resourceDomains` entries automatically
-    html     a complete document used verbatim (bring your own bridge)
+    html     a complete document used verbatim, such as a bundler's single-file
+             build: bring your own bridge, or `bridge=True` to put micromcp's
+             first in its head (`route`/`fetch` then apply to it)
     csp      extra `_meta.ui.csp` origins: connectDomains, resourceDomains,
              frameDomains, baseUriDomains
     border   `_meta.ui.prefersBorder`
 
     `body`, `head`, and `html` are a str or an object with `__html__`
-    (FastHTML components, htpy, `markupsafe.Markup`), rendered once, here.
+    (FastHTML components, htpy, `markupsafe.Markup`), rendered once, here;
+    `body` and `html` may also be a path to a file. A page that loads a
+    relative URL is refused: a widget has no origin to load it from.
 
     Widgets are static: hosts fetch them under their own identity and cache
     them per connector, so a changed page needs a new connector to show up.
@@ -262,7 +440,8 @@ class Widget:
                  head: HTMLLike = "",
                  imports: dict | None = None, route: str | None = None, fetch: str = "hooks",
                  csp: dict | None = None,
-                 border: bool | None = None, uri: str | None = None):
+                 border: bool | None = None, uri: str | None = None,
+                 bridge: bool = False, escape_scripts: bool = False):
         if not isinstance(name, str) or not _WIDGET_NAME_RE.fullmatch(name):
             raise ValueError(f"widget name {name!r}: letters, digits, '.', '_' and '-' only")
         self.name, self.title = name, title or name
@@ -273,14 +452,23 @@ class Widget:
             raise TypeError("Widget: give body= (a page built around the bridge) or html= "
                             "(a complete document of your own), not both")
         if html is not None:
-            if scripts or modules or styles or head or imports or route or fetch != "hooks":
+            if scripts or modules or styles or head or imports or escape_scripts:
                 raise TypeError("Widget(html=...) is used verbatim; scripts/modules/styles/"
-                                "head/route/fetch apply only to body=")
-            self.html, origins = _markup(html, "html"), set()
+                                "head/imports/escape_scripts apply only to body=")
+            if not bridge and (route or fetch != "hooks"):
+                raise TypeError("route/fetch are settings of micromcp's bridge: with html=, "
+                                "they need bridge=True")
+            self.html, origins = _markup(_read(html), "html"), set()
+            if bridge:
+                self.html = _with_bridge(self.html, route, fetch)
         else:
+            if bridge:
+                raise TypeError("a body= page always carries the bridge; bridge= is for html=")
             self.html, origins = _document(body, title=self.title, head=head, scripts=scripts,
                                            modules=modules, styles=styles, route=route,
-                                           fetch=fetch, imports=imports)
+                                           fetch=fetch, imports=imports,
+                                           escape_scripts=escape_scripts)
+        _check_urls(self.html, f"widget {name!r}")
         domains = {}
         for k, v in (csp or {}).items():
             if k not in _CSP_KEYS:
