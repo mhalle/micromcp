@@ -41,7 +41,7 @@ SWAP = 'hx-target="#app" hx-swap="innerMorph"'
 
 def todo_widget(title: str, load: str, route: str | None = None):
     """The same page for both servers; `load` is the htmx attribute that fetches the list."""
-    from micromcp_apps import Widget
+    from micromcp.apps import Widget
     return Widget("todos", title=title, styles=CSS, scripts=[HTMX], route=route, border=True,
                   body=(f"<h1>{html.escape(title)}</h1>"
                         f'<div id="app" {load} hx-trigger="mcp:ready" {SWAP}>'
@@ -87,7 +87,7 @@ class Todos:
 
 def plain_mcp():
     from micromcp import MCP
-    from micromcp_apps import fragment
+    from micromcp.apps import fragment
 
     mcp, todos = MCP("hm-plain", "0.1.0"), Todos()
 
@@ -167,7 +167,7 @@ def django_asgi():
     from django.urls import path
     from django.views.decorators.http import require_POST
     from micromcp import MCP, ASGIServer, django_async_view
-    from micromcp_apps.django import django_routes, set_mcp_context
+    from micromcp.apps.django import django_routes, set_mcp_context
 
     mcp, todos = MCP("hm-django", "0.1.0"), Todos()
     route = django_routes(mcp, prefixes=["/django/ui/"], host="localhost")
@@ -218,7 +218,7 @@ def build(devhost: bool = False):
     sys.path.insert(0, str(HERE))
     import toolkit_lab
     from micromcp import MCP, ASGIServer
-    from micromcp_apps import DEVHOST_HTML
+    from micromcp.apps import DEVHOST_HTML
     TEMPLATES.update(toolkit_lab.LAB_TEMPLATES)
     plain = ASGIServer(plain_mcp(), path="/mcp", allowed_origins=ORIGINS)
     dj = django_asgi()
@@ -266,9 +266,8 @@ except ImportError:
 if modal is not None:
     image = (modal.Image.debian_slim(python_version="3.12")
              .pip_install("django>=5.2")
-             .env({"PYTHONPATH": "/root/src:/root/apps_src", "WIRE_LOG": "1"})
-             .add_local_dir(HERE.parent.parent / "src", "/root/src")        # micromcp
-             .add_local_dir(HERE.parent / "src", "/root/apps_src")          # micromcp-apps
+             .env({"PYTHONPATH": "/root/src", "WIRE_LOG": "1"})
+             .add_local_dir(HERE.parent / "src", "/root/src")
              .add_local_dir(HERE / "vendor", "/root/vendor")
              .add_local_file(HERE / "toolkit_lab.py", "/root/toolkit_lab.py"))
     app = modal.App("micromcp-hypermedia")

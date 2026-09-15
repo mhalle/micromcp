@@ -1,8 +1,9 @@
-# micromcp-apps
+# micromcp.apps
 
-MCP Apps widgets for [micromcp](../README.md) servers. A widget is a static
+MCP Apps widgets for [micromcp](../README.md) servers, in the experimental
+`micromcp.apps` subpackage. A widget is a static
 HTML page the host renders in a sandboxed iframe next to the conversation;
-the host proxies its tool calls to your server. This package builds those
+the host proxies its tool calls to your server. This subpackage builds those
 pages and the server side they talk to:
 
 - `Widget`: a page around the bridge, published as a `ui://` resource by the
@@ -13,18 +14,14 @@ pages and the server side they talk to:
 - `Channel`: WebSocket-style messaging between open widgets and server code
 - a development MCP Apps host (`DEVHOST_HTML`)
 
-It is a separate distribution built only on micromcp's public API
-(`MCP.tool(meta=, visibility=)`, `MCP.resource`, `result`), so the core stays
-a small, dependency-free MCP server and this layer can change at the pace of
-the MCP Apps extension (2026-01-26) and the hosts that implement it.
-
-```sh
-# neither package is on PyPI yet; from a checkout of this repository:
-uv pip install -e . -e apps
-# or from GitHub:
-pip install "micromcp @ git+https://github.com/mhalle/micromcp" \
-            "micromcp-apps @ git+https://github.com/mhalle/micromcp#subdirectory=apps"
-```
+It ships in the micromcp wheel but stays apart from the core: `import
+micromcp` does not load it, its names are not in `micromcp.__all__`, it uses
+only micromcp's public API (`MCP.tool(meta=, visibility=)`, `MCP.resource`,
+`result`; a test enforces this), and it is not part of the single-file
+bundle. Like the core it needs nothing outside the standard library; Django
+is optional. It is **experimental**: it follows the MCP Apps extension
+(2026-01-26) and the behavior of the hosts that implement it, and may change
+in a minor release.
 
 ## Widgets
 
@@ -33,7 +30,7 @@ Declare a widget once and register the tools that show it through it:
 ```python
 from pathlib import Path
 from micromcp import MCP
-from micromcp_apps import Widget, fragment
+from micromcp.apps import Widget, fragment
 
 mcp = MCP("todos")
 board = Widget("todos", title="Todos", scripts=[Path("htmx.min.js")], body="""
@@ -100,7 +97,7 @@ Any other URL goes to the widget's `route=` tool — which is how existing
 Django views serve a widget:
 
 ```python
-from micromcp_apps.django import django_routes
+from micromcp.apps.django import django_routes
 
 board = Widget("todos", scripts=[Path("htmx.min.js")],
                route=django_routes(mcp, prefixes=["/app/"]),    # registers "django_http"
@@ -141,7 +138,7 @@ on its next turn, and no turn is started. In the browser, `mcp.setContext(text,
 data)` does the same for client-side state (debounced), and `mcp.say(text)` or
 `<button data-mcp-say="...">` posts a message into the chat as the user,
 which does start a turn. From Django, `set_mcp_context(response, text, data)`
-(in `micromcp_apps.django`) on any response in a redirect chain has the same
+(in `micromcp.apps.django`) on any response in a redirect chain has the same
 effect.
 
 What Claude did with them on 2026-09-14: each update **replaces** the
@@ -167,7 +164,7 @@ user — need a way in. A channel is that way in, with the WebSocket API on the
 widget's side:
 
 ```python
-from micromcp_apps import Channel
+from micromcp.apps import Channel
 
 scene = Channel(mcp, "scene")
 
@@ -247,7 +244,7 @@ with tools and with Django views, the toolkit lab, and the context counter).
 
 ## Tests
 
-`apps/tests/test_apps.py`, run by the repository's `pytest` alongside the
-core suites (`pytest apps/tests` for this package alone). The bridge's
-JavaScript is syntax-checked with `node --check` when node is installed and
-exercised end to end in the dev host.
+`tests/test_apps.py`, run by the repository's `pytest` with the core suites
+(it skips itself against the single-file bundle). The bridge's JavaScript is
+syntax-checked with `node --check` when node is installed and exercised end
+to end in the dev host.

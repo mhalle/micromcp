@@ -245,7 +245,7 @@ def _body(kit):
 
 
 def _page(kit):
-    from micromcp_apps import BRIDGE_JS
+    from micromcp.apps import BRIDGE_JS
     n = f' nonce="{NONCE}"' if kit in ("live_csp", "datastar_csp") else ""
 
     def tag(src, module=False):
@@ -302,8 +302,8 @@ def _widget(page_html, kit):
 
 def lab_mcp():
     from micromcp import MCP
-    from micromcp_apps import Widget, fragment
-    from micromcp_apps.django import django_routes
+    from micromcp.apps import Widget, fragment
+    from micromcp.apps.django import django_routes
 
     mcp = MCP("hm-lab", "0.1.0")
     for kit in KITS:
@@ -407,7 +407,7 @@ def _cdn_scripts(variant):
 
 def cdn_mcp():
     from micromcp import MCP
-    from micromcp_apps import Widget, fragment, page
+    from micromcp.apps import Widget, fragment, page
 
     mcp = MCP("hm-cdn", "0.1.0")
 
@@ -494,7 +494,7 @@ def _ctx_render(n, seq):
 
 
 def add_counter(mcp):
-    from micromcp_apps import fragment, page
+    from micromcp.apps import fragment, page
 
     uri = "ui://hm-lab/context-v1"
     body = ('<h1>Context lab: counter</h1>'

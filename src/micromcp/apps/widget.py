@@ -18,7 +18,7 @@ The page carries `BRIDGE_JS`, which completes the handshake and gives
 hypermedia libraries a tool-call transport: `hx-post="tool:todo_add"` calls
 the tool `todo_add` with the form's fields as arguments and swaps its
 `fragment()` into the page. Other URLs go to the `route=` tool, which is how
-Django views serve a widget (`micromcp_apps.django.django_routes`). In the
+Django views serve a widget (`micromcp.apps.django.django_routes`). In the
 page, `mcp.setContext(text, data)` and `mcp.say(text)` talk to the model;
 from the server, `fragment(..., context=...)` does.
 """

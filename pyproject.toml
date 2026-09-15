@@ -57,18 +57,13 @@ Changelog = "https://github.com/mhalle/micromcp/blob/main/CHANGELOG.md"
 path = "src/micromcp/__init__.py"
 
 [tool.hatch.build.targets.sdist]
-include = ["src/micromcp", "tests", "tools", ".github", "README.md", "CHANGELOG.md", "SECURITY.md", "LICENSE", "NOTICE"]
+include = ["src/micromcp", "tests", "tools", "docs", ".github", "README.md", "CHANGELOG.md", "SECURITY.md", "LICENSE", "NOTICE"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/micromcp"]
 
-# apps/ is micromcp-apps, a separate distribution built on this one's public API.
-[tool.uv.workspace]
-members = ["apps"]
-
 [tool.pytest.ini_options]
-testpaths = ["tests", "apps/tests"]
-addopts = "--import-mode=importlib"   # two test_scripts.py, one per package
+testpaths = ["tests"]
 python_files = ["test_scripts.py"]   # the other files are runnable scripts, driven by test_scripts.py
 markers = [
   "unit: stdlib only (may bind a loopback port), no optional dependencies",
@@ -90,5 +85,3 @@ ignore = ["E731"]
 "tests/*" = ["E401", "E402", "E501", "E701", "E702", "E741", "B006", "B007", "B008", "B011", "B017", "B018", "B020", "B023", "B905", "UP"]
 # Examples embed HTML/JS in strings; line length is not a signal there.
 "examples/*" = ["E401", "E501", "E702"]
-"apps/tests/*" = ["E401", "E402", "E501", "E701", "E702", "E741", "B006", "B007", "B008", "B011", "B017", "B018", "B020", "B023", "B905", "UP"]
-"apps/examples/*" = ["E401", "E501", "E702"]

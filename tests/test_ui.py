@@ -1,5 +1,5 @@
 """The core's MCP Apps surface: tool visibility and `ui://` resources.
-Widgets, fragments, and channels live in micromcp-apps (apps/)."""
+Widgets, fragments, and channels are micromcp.apps (test_apps.py)."""
 import io
 import json
 import sys

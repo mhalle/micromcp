@@ -113,10 +113,11 @@ exactly as for tools, and docstring `Args:` become argument descriptions.
 
 A widget is a static HTML page the host renders in a sandboxed iframe next to
 the conversation. The core provides the protocol pieces below;
-[micromcp-apps](apps/README.md), a separate package in this repository, builds
-on them with `Widget`, HTML fragments, hypermedia over tool calls (htmx, fixi,
-Django views), model context, WebSocket-style channels to open widgets, and a
-development host.
+`micromcp.apps`, an experimental subpackage ([docs/apps.md](docs/apps.md)),
+builds on them with `Widget`, HTML fragments, hypermedia over tool calls (htmx,
+fixi, Django views), model context, WebSocket-style channels to open widgets,
+and a development host. `import micromcp` does not load it, and it is not part
+of the single-file bundle.
 
 A widget is a resource and a pointer to it:
 

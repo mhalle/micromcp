@@ -18,10 +18,10 @@
   `_meta.ui.visibility`; app-only tools are hidden from the model by the host
   and callable by the server's widgets. New suite `tests/test_ui.py`.
 
-### micromcp-apps (new package in `apps/`)
-- A separate distribution, `micromcp-apps` (import `micromcp_apps`), built
-  only on micromcp's public API; the core and its single-file bundle carry no
-  widget code. The repository is a uv workspace of the two.
+### MCP Apps: `micromcp.apps` (experimental)
+- A subpackage imported only on request (`from micromcp.apps import ...`),
+  built only on micromcp's public API (a test enforces this), and left out of
+  `micromcp.__all__` and the single-file bundle.
 - `Widget(name, body= | html=, scripts=, modules=, styles=, imports=, route=,
   fetch=, csp=, border=)` declares a widget once (`imports=` writes an import
   map, e.g. for three.js from a CDN). `@widget.tool(mcp, ...)` registers a
@@ -47,7 +47,7 @@
   shared app-only tools carry it, `channel_recv` being a long poll (20 s by
   default, verified in Claude); connections are bound to their principal,
   dropped when idle, and closed when too far behind.
-- Django: `micromcp_apps.django.django_routes(mcp, prefixes=)` serves Django
+- Django: `micromcp.apps.django.django_routes(mcp, prefixes=)` serves Django
   views to widgets in process (prefix-confined, redirects followed,
   hypermedia headers forwarded, JSON bodies); `set_mcp_context(response,
   text, data)`.
@@ -61,11 +61,11 @@
   not plain origins. `django_routes` refuses control characters and invalid
   UTF-8 in paths. The README warns against swapping user-authored HTML into a
   widget.
-- Examples in `apps/examples/`: `mcp_app_3d.py` (a shared three.js scene the
+- Examples: `mcp_app_3d.py` (a shared three.js scene the
   model builds and the user selects in), `mcp_app_hypermedia.py` (todo widget
   with tools and with Django views), `toolkit_lab.py` (nine self-testing
   toolkit variants and a model-context counter). Suite
-  `apps/tests/test_apps.py`.
+  `tests/test_apps.py`.
 
 ## 0.1.0 — 2026-09-14 (tagged; not yet on PyPI)
 
