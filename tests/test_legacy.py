@@ -342,6 +342,11 @@ def oauth_wsgi_section():
     body, hdrs = modern("tools/call", {"name": "secret", "arguments": {}}, name="secret")
     s, j, h = wsgi(app, body, {**hdrs, "Authorization": "Bearer ok"}, path="/mcp")
     check("Unauthorized from a handler is 401 too", (s, 'scope="secret"' in h.get("www-authenticate", "")), (401, True))
+    lapp = Server(build(), authenticate=authenticate, path="/mcp", resource_metadata=DOC,
+                  legacy="stateless")
+    s, j, h = wsgi(lapp, rpc("tools/list"), {"MCP-Protocol-Version": "2025-11-25"}, path="/mcp")
+    check("a legacy request's 401 names the era it was served in",
+          (s, h.get("mcp-protocol-version")), (401, "2025-11-25"))
     guarded = Server(build(), path="/mcp", resource_metadata=DOC)     # no authenticate: principal None
     body, hdrs = modern("tools/call", {"name": "vault", "arguments": {}}, name="vault")
     s, j, h = wsgi(guarded, body, hdrs, path="/mcp")

@@ -1,9 +1,11 @@
 """OAuth: `Unauthorized`'s 403 step-up form (core; runs in the single-file
-bundle too), then `micromcp.contrib.oauth.OAuth` against a local fake
-authorization server: discovery, JWT checks, scopes, introspection, static
-tokens, and the warnings that predict a failed sign-in.
+bundle too), then `micromcp.contrib.oauth.OAuth` against local fake
+authorization servers: discovery, JWT checks, scopes, introspection, static
+tokens, slow and broken providers, and the warnings that predict a failed
+sign-in.
 """
-import base64, collections, hashlib, hmac, http.server, io, json, logging, sys, threading, time
+import asyncio, base64, collections, concurrent.futures, hashlib, hmac, http.server, inspect, io
+import json, logging, sys, threading, time
 from urllib.parse import parse_qs
 from micromcp import MCP, Server, Principal, Unauthorized, PROTOCOL, META_VER, META_CAPS, WELL_KNOWN
 from _helpers import free_port
@@ -32,6 +34,7 @@ def raises(fn, exc=ValueError):
 
 RESOURCE = "https://todos.example/mcp"
 WK = f"https://todos.example{WELL_KNOWN}/mcp"
+META = "/.well-known/oauth-authorization-server"
 STEP_UP = "The access token lacks a scope this operation needs"
 
 
@@ -63,6 +66,18 @@ def result(resp):
     return resp[1]["result"].get("structuredContent")
 
 
+def timed(fn):
+    t0 = time.monotonic()
+    out = fn()
+    return out, time.monotonic() - t0
+
+
+def burst(n, fn):
+    """`fn()` from n threads at once."""
+    with concurrent.futures.ThreadPoolExecutor(n) as ex:
+        return [f.result() for f in [ex.submit(fn) for _ in range(n)]]
+
+
 # ── core: the 403 step-up form ─────────────────────────────────────────────
 print("Unauthorized.insufficient_scope (core)")
 e = Unauthorized.insufficient_scope("files:write")
@@ -76,7 +91,7 @@ check("the other forms stay 401", (Unauthorized().status, Unauthorized.invalid()
       (401, 401))
 changed = Unauthorized()
 changed.error = "insufficient_scope"
-check("refresh() recomputes the status with the header", changed.refresh().status, 403)
+check("the status follows `error` even without refresh()", changed.status, 403)
 core = MCP("core-403", "0.1.0")
 
 
@@ -126,8 +141,15 @@ JWK.update(kid="k1", alg="RS256", use="sig")
 BASIC = "Basic " + base64.b64encode(b"rs:s3cret").decode()
 
 
+class Quiet(http.server.ThreadingHTTPServer):
+    def handle_error(self, request, client_address):
+        pass                                  # clients that give up break pipes; expected
+
+
 class FakeAS:
-    """An authorization server's public face: metadata, keys, introspection."""
+    """An authorization server's public face: metadata, keys, introspection.
+    `behave[path]` makes a path misbehave: "garbage", "hang", "trickle", raw
+    bytes, or a JSON object to answer instead; `delay[path]` slows it."""
 
     def __init__(self, **meta):
         self.port = free_port()
@@ -138,7 +160,7 @@ class FakeAS:
                "code_challenge_methods_supported": ["S256"],
                "client_id_metadata_document_supported": True, **meta}
         self.meta = {k: v for k, v in doc.items() if v is not None}
-        self.opaque = {}
+        self.opaque, self.behave, self.delay = {}, {}, {}
         fake = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -146,16 +168,42 @@ class FakeAS:
                 pass
 
             def reply(self, status, doc):
-                body = json.dumps(doc).encode()
+                body = doc if isinstance(doc, bytes) else json.dumps(doc).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
 
+            def misbehave(self, normal):
+                time.sleep(fake.delay.get(self.path, 0))
+                how = fake.behave.get(self.path)
+                if how is None:
+                    return False
+                if how == "garbage":
+                    self.wfile.write(b"garbage\r\n\r\n")
+                    self.close_connection = True
+                elif how == "hang":
+                    time.sleep(30)
+                elif how == "trickle":
+                    body = json.dumps(normal).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    for b in body:
+                        self.wfile.write(bytes([b]))
+                        self.wfile.flush()
+                        time.sleep(0.1)
+                else:
+                    self.reply(200, how)
+                return True
+
             def do_GET(self):
                 fake.hits[self.path] += 1
-                if self.path == "/.well-known/oauth-authorization-server":
+                normal = fake.meta if self.path == META else {"keys": [JWK]}
+                if self.misbehave(normal):
+                    return
+                if self.path == META:
                     return self.reply(200, fake.meta)
                 if self.path == "/jwks":
                     return self.reply(200, {"keys": [JWK]})
@@ -164,11 +212,13 @@ class FakeAS:
             def do_POST(self):
                 fake.hits[self.path] += 1
                 form = parse_qs(self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode())
+                if self.misbehave({}):
+                    return
                 if self.headers.get("Authorization") != BASIC:
                     return self.reply(401, {"error": "invalid_client"})
                 self.reply(200, fake.opaque.get(form.get("token", [""])[0], {"active": False}))
 
-        server = http.server.ThreadingHTTPServer(("127.0.0.1", self.port), Handler)
+        server = Quiet(("127.0.0.1", self.port), Handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
 
 
@@ -225,6 +275,10 @@ def whoami_mcp(auth=None):
     return mcp
 
 
+def server(auth, mcp=None):
+    return Server(mcp or whoami_mcp(), authenticate=auth, path="/mcp")
+
+
 auth = OAuth(issuer=AS.base, resource=RESOURCE, scopes=["todos:read"],
              implies={"todos:admin": ["todos:write", "todos:read"]})
 app = Server(whoami_mcp(auth), authenticate=auth, path="/mcp", resource_metadata=auth.metadata)
@@ -239,17 +293,24 @@ print("construction")
 check("metadata is the RFC 9728 document", auth.metadata,
       {"resource": RESOURCE, "authorization_servers": [AS.base],
        "bearer_methods_supported": ["header"], "scopes_supported": ["todos:read"]})
+check("OAuth is an async authenticate: no pool thread per request",
+      inspect.iscoroutinefunction(OAuth.__call__), True)
 for label, kw in [("an http issuer that is not localhost", {"issuer": "http://auth.example"}),
+                  ("an issuer with a query", {"issuer": AS.base + "/?tenant=x"}),
                   ("a symmetric algorithm", {"algorithms": ["HS256"]}),
-                  ("the none algorithm", {"algorithms": ["none"]}),
+                  ("the none algorithm", {"algorithms": "none"}),
                   ("offline_access", {"scopes": ["offline_access"]}),
                   ("a resource with a fragment", {"resource": RESOURCE + "#x"}),
                   ("a scope with a space", {"scopes": ["a b"]}),
+                  ("implies that is not a dict", {"implies": ["todos:admin"]}),
                   ("a NaN leeway", {"leeway": float("nan")}),
                   ("a zero timeout", {"timeout": 0}),
                   ("a malformed introspection pair", {"introspection": ("only-id",)})]:
     kwargs = {"issuer": AS.base, "resource": RESOURCE, **kw}
     check(f"OAuth refuses {label}", raises(lambda k=kwargs: OAuth(**k)), "ValueError")
+lenient = OAuth(issuer=AS.base, resource=RESOURCE, algorithms="RS256", scopes=None)
+check("one algorithm may be a str; scopes may be None", (lenient.algorithms, lenient.scopes),
+      (("RS256",), ()))
 check("discovery URLs for an issuer with a path", oauth_mod._metadata_urls("https://a.example/t1"),
       ["https://a.example/.well-known/oauth-authorization-server/t1",
        "https://a.example/.well-known/openid-configuration/t1",
@@ -281,7 +342,7 @@ check("scp lists are read too",
 check("aud may be a list naming this server", tool(app, "whoami", token(aud=["o", RESOURCE]))[0], 200)
 check("exp inside the leeway is accepted", tool(app, "whoami", token(exp=int(time.time()) - 10))[0],
       200)
-check("the metadata was fetched once", AS.hits["/.well-known/oauth-authorization-server"], 1)
+check("the metadata was fetched once", AS.hits[META], 1)
 check("the keys were fetched once", AS.hits["/jwks"], 1)
 now = int(time.time())
 for label, tok in [("expired past the leeway", token(exp=now - 120)),
@@ -300,7 +361,7 @@ for label, tok in [("expired past the leeway", token(exp=now - 120)),
           (s, 'error="invalid_token"' in h.get("www-authenticate", "")), (401, True))
 for i in range(5):
     tool(app, "whoami", token(kid=f"unknown{i}"))
-check("unknown key ids do not hammer the key endpoint", AS.hits["/jwks"] <= 2, True)
+check("unknown key ids do not hammer the key endpoint", AS.hits["/jwks"], 1)
 
 # ── scopes ─────────────────────────────────────────────────────────────────
 print("scopes")
@@ -322,21 +383,89 @@ check("the principal lists the implied scopes", result(tool(app, "whoami", admin
 check("check() refuses a principal that is not one of ours",
       raises(lambda: auth.check(None, "todos:read"), Unauthorized), "Unauthorized")
 
-# ── provider failures ──────────────────────────────────────────────────────
-print("provider failures")
-down = OAuth(issuer=f"http://127.0.0.1:{free_port()}", resource=RESOURCE)
-dapp = Server(whoami_mcp(), authenticate=down, path="/mcp")
-s, j, h = call(dapp, "tools/list", token=token())
+# ── slow providers: nothing waits for a thread, nobody waits past timeout ──
+print("slow providers")
+slow = FakeAS()
+slow.delay.update({META: 0.3, "/jwks": 0.3})
+sapp = server(OAuth(issuer=slow.base, resource=RESOURCE))
+statuses = burst(16, lambda: tool(sapp, "whoami", token(iss=slow.base))[0])
+check("16 concurrent first requests to a slow provider all succeed", statuses, [200] * 16)
+check("... sharing one metadata fetch and one key fetch", (slow.hits[META], slow.hits["/jwks"]),
+      (1, 1))
+trickle = FakeAS()
+trickle.behave[META] = "trickle"
+tapp = server(OAuth(issuer=trickle.base, resource=RESOURCE, timeout=0.5))
+with concurrent.futures.ThreadPoolExecutor(8) as ex:
+    stuck = [ex.submit(timed, lambda: tool(tapp, "whoami", token(iss=trickle.base))[0])
+             for _ in range(4)]
+    time.sleep(0.05)
+    quick = [ex.submit(timed, lambda: call(tapp, "tools/list")[0]) for _ in range(4)]
+    stuck, quick = [f.result() for f in stuck], [f.result() for f in quick]
+check("a provider trickling its metadata is 503 within the timeout",
+      [(st, d < 2.0) for st, d in stuck], [(503, True)] * 4)
+check("... while tokenless requests still get the 401 at once",
+      [(st, d < 0.3) for st, d in quick], [(401, True)] * 4)
+hang = FakeAS()
+happ = server(OAuth(issuer=hang.base, resource=RESOURCE, timeout=0.5))
+check("warm-up with a healthy key endpoint", tool(happ, "whoami", token(iss=hang.base))[0], 200)
+hang.behave["/jwks"] = "hang"
+oauth_mod.KEY_COOLDOWN = 0                     # let an unknown key id force a load at once
+with concurrent.futures.ThreadPoolExecutor(2) as ex:
+    rotated = ex.submit(timed, lambda: tool(happ, "whoami", token(iss=hang.base, kid="new"))[0])
+    time.sleep(0.05)
+    cached = ex.submit(timed, lambda: tool(happ, "whoami", token(iss=hang.base))[0])
+    rotated, cached = rotated.result(), cached.result()
+check("an unknown key id with a hanging key endpoint is 503 within the timeout",
+      (rotated[0], rotated[1] < 2.0), (503, True))
+check("... while a token with a cached key is answered at once", (cached[0], cached[1] < 0.3),
+      (200, True))
+time.sleep(1.0)                                # let the hung load give up
+hang.behave.pop("/jwks")
+hang.delay["/jwks"] = 0.3
+oauth_mod.KEYS_TTL = 0                         # every key is due for a refresh
+before = hang.hits["/jwks"]
+(st, d) = timed(lambda: tool(happ, "whoami", token(iss=hang.base))[0])
+check("keys due for a refresh are used while it runs in the background", (st, d < 0.25),
+      (200, True))
+time.sleep(0.6)
+check("... and the refresh happens", hang.hits["/jwks"] > before, True)
+oauth_mod.KEYS_TTL, oauth_mod.KEY_COOLDOWN = 300.0, 30.0
+
+# ── broken providers are 503, never 500 or 401 ─────────────────────────────
+print("broken providers")
+down = server(OAuth(issuer=f"http://127.0.0.1:{free_port()}", resource=RESOURCE))
+s, j, h = call(down, "tools/list", token=token())
 check("an unreachable provider is 503, not a new sign-in",
       (s, j["error"]["code"], "www-authenticate" in h), (503, -32603, False))
-t0 = time.monotonic()
-s = call(dapp, "tools/list", token=token())[0]
-check("... and is not retried on every request", (s, time.monotonic() - t0 < 0.5), (503, True))
+(st, d) = timed(lambda: call(down, "tools/list", token=token())[0])
+check("... and is not retried on every request", (st, d < 0.5), (503, True))
+for label, path, how in [("a garbage status line", META, "garbage"),
+                         ("an HTML page", META, b"<html>down for maintenance</html>"),
+                         ("NaN in the JSON", META, b'{"issuer": NaN}')]:
+    f = FakeAS()
+    f.behave[path] = how
+    check(f"discovery answered with {label} is 503",
+          tool(server(OAuth(issuer=f.base, resource=RESOURCE)), "whoami", token(iss=f.base))[0], 503)
+for label, how in [("a garbage status line", "garbage"), ("an HTML page", b"<html></html>"),
+                   ("an empty key set", {"keys": []}),
+                   ("only a symmetric key", {"keys": [{"kty": "oct", "k": "c2VjcmV0", "kid": "k1"}]})]:
+    f = FakeAS()
+    f.behave["/jwks"] = how
+    check(f"a key endpoint answering {label} is 503, not 401",
+          tool(server(OAuth(issuer=f.base, resource=RESOURCE)), "whoami", token(iss=f.base))[0], 503)
 evil = FakeAS(issuer="https://evil.example")
-eapp = Server(whoami_mcp(), authenticate=OAuth(issuer=evil.base, resource=RESOURCE), path="/mcp")
 check("metadata naming another issuer is not used",
-      (call(eapp, "tools/list", token=token())[0], any("names issuer" in m for m in grab.records)),
-      (503, True))
+      (tool(server(OAuth(issuer=evil.base, resource=RESOURCE)), "whoami", token())[0],
+       any("names issuer" in m for m in grab.records)), (503, True))
+oauth_mod.RETRY_AFTER = 0.2
+nokeys = FakeAS(jwks_uri=None)
+napp = server(OAuth(issuer=nokeys.base, resource=RESOURCE))
+check("metadata without jwks_uri is 503", tool(napp, "whoami", token(iss=nokeys.base))[0], 503)
+nokeys.meta["jwks_uri"] = f"{nokeys.base}/jwks"
+time.sleep(0.3)
+check("... and is not cached: fixed metadata is picked up",
+      tool(napp, "whoami", token(iss=nokeys.base))[0], 200)
+oauth_mod.RETRY_AFTER = 10.0
 
 # ── warnings ───────────────────────────────────────────────────────────────
 print("warnings")
@@ -350,10 +479,10 @@ check("... and one clients cannot register with",
 grab.records.clear()
 OAuth(issuer=AS.base, resource=RESOURCE).discover()
 check("a provider MCP clients can use draws no warning", grab.records, [])
-check("a registration endpoint is enough",
-      (grab.records.clear(), OAuth(issuer=FakeAS(client_id_metadata_document_supported=None,
-                                                 registration_endpoint="https://r").base,
-                                   resource=RESOURCE).discover(), grab.records)[2], [])
+grab.records.clear()
+OAuth(issuer=FakeAS(client_id_metadata_document_supported=None,
+                    registration_endpoint="https://r.example").base, resource=RESOURCE).discover()
+check("a registration endpoint is enough", grab.records, [])
 
 # ── introspection ──────────────────────────────────────────────────────────
 print("introspection")
@@ -366,9 +495,10 @@ AS.opaque.update({
                     "exp": now + 300},
     "op-expired": {"active": True, "iss": AS.base, "aud": RESOURCE, "exp": now - 300},
     "op-off": {"active": False},
+    "op-nan": {"active": True, "iss": AS.base, "aud": RESOURCE, "exp": float("nan")},
 })
-iapp = Server(whoami_mcp(), path="/mcp",
-              authenticate=OAuth(issuer=AS.base, resource=RESOURCE, introspection=("rs", "s3cret")))
+iauth = OAuth(issuer=AS.base, resource=RESOURCE, introspection=("rs", "s3cret"))
+iapp = server(iauth)
 check("an active opaque token reaches the tool", result(tool(iapp, "whoami", "op-good")),
       {"sub": "bob", "client_id": "claude", "scopes": ["todos:write"]})
 before = AS.hits["/introspect"]
@@ -378,22 +508,44 @@ for label, tok in [("inactive", "op-off"), ("missing its audience", "op-noaud"),
                    ("from another issuer", "op-otheriss"), ("expired", "op-expired"),
                    ("unknown", "op-nope")]:
     check(f"an opaque token {label} is 401", tool(iapp, "whoami", tok)[0], 401)
-wapp = Server(whoami_mcp(), path="/mcp",
-              authenticate=OAuth(issuer=AS.base, resource=RESOURCE, introspection=("rs", "no")))
+check("an introspection answer with NaN is refused as not JSON (503)",
+      tool(iapp, "whoami", "op-nan")[0], 503)
+check("non-finite exp is never in date",
+      raises(lambda: iauth._introspected({"active": True, "iss": AS.base, "aud": RESOURCE,
+                                          "exp": float("inf")}, time.time()), Unauthorized),
+      "Unauthorized")
 check("rejected introspection credentials are 503, not the caller's fault",
-      tool(wapp, "whoami", "op-good")[0], 503)
+      tool(server(OAuth(issuer=AS.base, resource=RESOURCE, introspection=("rs", "no"))),
+           "whoami", "op-good")[0], 503)
+garbled = FakeAS()
+garbled.behave["/introspect"] = "garbage"
+check("an introspection endpoint answering garbage is 503",
+      tool(server(OAuth(issuer=garbled.base, resource=RESOURCE, introspection=("rs", "s3cret"))),
+           "whoami", "op-good")[0], 503)
+slowi = FakeAS()
+slowi.delay["/introspect"] = 0.3
+slowi.opaque["op"] = {"active": True, "iss": slowi.base, "aud": RESOURCE, "sub": "c",
+                      "exp": now + 300}
+siapp = server(OAuth(issuer=slowi.base, resource=RESOURCE, introspection=("rs", "s3cret")))
+check("16 concurrent requests with one new opaque token all succeed",
+      burst(16, lambda: tool(siapp, "whoami", "op")[0]), [200] * 16)
+check("... sharing one introspection", slowi.hits["/introspect"], 1)
 
 # ── static ─────────────────────────────────────────────────────────────────
 print("static")
 st = OAuth.static({"dev": {"sub": "me", "scope": "todos:write"}}, scopes=["todos:read"])
-sapp = Server(whoami_mcp(), authenticate=st, path="/mcp")
+stapp = server(st)
 check("static: metadata is None", st.metadata, None)
-check("static: a listed token is its principal", result(tool(sapp, "whoami", "dev")),
+check("static: a listed token is its principal", result(tool(stapp, "whoami", "dev")),
       {"sub": "me", "client_id": None, "scopes": ["todos:write"]})
-check("static: any other token is 401", tool(sapp, "whoami", "nope")[0], 401)
-check("static: check() works the same",
-      raises(lambda: st.check(st({"authorization": "Bearer dev"}), "todos:admin"), Unauthorized),
+check("static: any other token is 401", tool(stapp, "whoami", "nope")[0], 401)
+dev = asyncio.run(st({"authorization": "Bearer dev"}))
+check("static: check() works the same", raises(lambda: st.check(dev, "todos:admin"), Unauthorized),
       "Unauthorized")
+dev["claims"]["scope"] += " todos:admin"
+dev["scopes"].append("todos:admin")
+check("a handler changing its principal changes nothing for the next request",
+      asyncio.run(st({"authorization": "Bearer dev"}))["scopes"], ["todos:write"])
 check("static: there is nothing to discover", raises(st.discover, RuntimeError), "RuntimeError")
 
 print(f"\n{OK} passed, {FAIL} failed")

@@ -890,7 +890,7 @@ class _Core:
         if len(raw) > self.max_body:
             return self.too_large(), None
         big = len(raw) > self.offload_bytes
-        rid = None
+        rid, era = None, "modern"
         try:
             try:
                 body = (await self.offload(_loads, raw, aux=True) if big
@@ -930,8 +930,8 @@ class _Core:
                     raise Error(INTERNAL_ERROR, "Internal error", 500)
             bound = (await self._bind_call(params, principal, big)
                      if method == "tools/call" else None)
-        except Error as e:
-            return self._error_reply(e, rid, headers), None
+        except Error as e:            # an auth error names the era the request was served in
+            return self._error_reply(e, rid, headers, era), None
         except Exception:
             log.exception("request preparation failed")
             return _err(500, rid, INTERNAL_ERROR, "Internal error"), None

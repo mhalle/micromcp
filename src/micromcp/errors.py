@@ -100,9 +100,18 @@ class Unauthorized(Error):
                             if attrs else "")
         return [("WWW-Authenticate", value)]
 
+    @property
+    def status(self):
+        """401, or 403 for `insufficient_scope`: derived from `error`, so the
+        status and the challenge can never disagree."""
+        return 403 if self.error == "insufficient_scope" else 401
+
+    @status.setter
+    def status(self, value):             # Error.__init__ assigns one; `error` decides
+        pass
+
     def refresh(self):
-        """Recompute `headers` and the status from the fields (after changing one)."""
-        self.status = 403 if self.error == "insufficient_scope" else 401
+        """Recompute `headers` from the fields (after changing one)."""
         self.headers = self.challenge()
         return self
 
