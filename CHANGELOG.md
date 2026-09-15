@@ -80,13 +80,19 @@
   others (an f-string URL lets `milk&role=admin` add one).
 - Bundled widgets: `Widget(html=Path(...))` reads a complete page from a file
   (`body=` takes a path too), and `bridge=True` puts the bridge first in its
-  head, with `route=`/`fetch=`. A page that loads a relative URL, which a
-  widget cannot fetch, is refused when the widget is built (`src`/`href`/
-  `srcset` on loading elements, `url()`/`@import` in styles, import maps;
-  relative paths inside inline scripts are logged); an https `<base href>`
-  exempts it. `escape_scripts=True` rewrites `</script` in inlined scripts
-  instead of refusing them. `BRIDGE_TYPES` declares `window.mcp` for
-  TypeScript. `docs/apps.md` covers Vite (checked with 8.3) and Bun.
+  head, with `route=`/`fetch=`, at the parsed head (a `<head>` in a comment
+  or a string is not it). A page that loads a relative URL, which a widget
+  cannot fetch, is refused when the widget is built (`src`/`href`/`srcset`/
+  `background` on loading elements, `srcdoc`, `url()`/`image-set()`/`@import`
+  in styles, import maps); loads after a valid https `<base href>` pass.
+  Warnings, not refusals: relative imports and asset paths inside inline
+  scripts (Vite 8's backtick strings included), files left next to an
+  `html=`/`body=`/`modules=` path (a split chunk, a worker, a `public/` file),
+  and another MCP Apps client beside micromcp's bridge. `escape_scripts=True`
+  rewrites `</script` in inlined scripts instead of refusing them; `<!--`
+  followed by `<script` is refused either way. `BRIDGE_TYPES` declares
+  `window.mcp` for TypeScript. `docs/apps.md` covers Vite (checked with 8.3),
+  workers and WASM, and Bun (checked with 1.4.0).
 - Model context: `fragment(context=)` and `mcp.setContext()` send
   `ui/update-model-context` (text plus data as a labeled JSON block);
   `mcp.say()` and `data-mcp-say` send `ui/message`.

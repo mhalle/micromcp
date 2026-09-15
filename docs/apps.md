@@ -163,25 +163,50 @@ never both.
 
 **What micromcp checks when the widget is built.** A page that loads a
 relative URL is refused, with the URL and where it appears: `src`, `href`,
-and `srcset` on elements that load (scripts, stylesheets and preloads, images,
-media, frames), `url()` and `@import` in styles, and import maps. Links,
-hypermedia attributes, and `<link rel="icon">` are not loads, and a page with
-an https `<base href>` is not checked. Relative imports and asset paths inside
-inline scripts are only logged, since they may be mere strings. An inlined
+`srcset`, and `background` on elements that load (scripts, stylesheets and
+preloads, images, media, frames, including `srcdoc`), `url()`, `image-set()`,
+and `@import` in styles, and import maps. Links, hypermedia attributes,
+`<link rel="icon">`, and `<noscript>` content are not loads, and loads after a
+valid https `<base href>` resolve against it. Inside inline scripts, relative
+imports, `new URL(..., import.meta.url)`, and asset paths (a `public/` file
+used from a script, say) are logged as warnings, since they may be mere
+strings; so are files left next to an `html=`, `body=`, or `modules=` path.
+A working build folder holds only what you pass, so anything else there, a
+split chunk, a worker, a copied `public/` file, is something the widget will
+fail to load. A page carrying another MCP Apps client as well as micromcp's
+bridge is warned about too: that is two handshakes with the host. An inlined
 script containing `</script` is refused; `escape_scripts=True` rewrites it as
-`<\/script`, as bundlers do. Files are read when the `Widget` is built, so
-restart the server after a rebuild, and remember that hosts cache a widget per
-connector.
+`<\/script`, as bundlers do (the raw text of a `String.raw` template then
+keeps the backslash). `<!--` followed by `<script` inside a script is refused
+either way. Files are read when the `Widget` is built, so restart the server
+after a rebuild, and remember that hosts cache a widget per connector.
 
-**Bun (checked with 1.4.0)** bundles code and CSS into one file each, quickly
-(`bun build src/main.ts --outdir dist --minify --entry-naming "[name].[ext]"
---asset-naming "[name].[ext]"`), but it does not yet inline everything: images
-imported from scripts become separate files (refused as relative URLs) or,
-with the `dataurl` loader, empty strings; images in CSS are inlined only with
-the default loader; and `</script` in strings is left raw (use
-`escape_scripts=True`). Keep a Bun-built widget's images in CSS, or use Vite.
-Other bundlers need the same three things: one output file, assets as data
-URLs, and names without hashes.
+**Workers, WASM, and URLs built at run time.** `codeSplitting: false` does
+not inline a worker created as `new Worker(new URL("./w.js",
+import.meta.url))`; import it as `"./w.js?worker&inline"` instead (for
+monaco-editor, return such workers from `MonacoEnvironment.getWorker`). An
+inlined worker runs from a `blob:` URL, and inlined WASM is fetched from a
+`data:` URL or compiled from bytes, so both also need a host whose policy
+allows them (`blob:` workers, `data:` fetches, `'wasm-unsafe-eval'`): under
+the stricter default policy the MCP Apps spec describes, which the dev host
+applies, they are blocked, while images, fonts, and CSS inlined as data URLs
+work under either. A library that builds asset URLs at run time cannot be
+checked: Leaflet's default marker icons, for one, go missing unless pointed
+at imported images (`L.Icon.Default.mergeOptions({iconUrl, iconRetinaUrl,
+shadowUrl})` is the usual fix).
+
+**Bun (checked with 1.4.0).** For one complete page, `bun build --compile
+--target=browser --production index.html --outdir dist` writes a
+self-contained `dist/index.html`, images imported from scripts included; pass
+it as `html=`. The one-module shape (`bun build src/main.ts --outdir dist
+--production --entry-naming "[name].[ext]" --asset-naming "[name].[ext]"`)
+does not inline everything: images imported from scripts become separate
+files, or empty strings with the `dataurl` loader, and images in CSS are
+inlined only with the default loader. Pass `--production` either way, or
+React ships its development build, and give a Bun-built React module
+`escape_scripts=True`: react-dom's `"<script></script>"` is left raw. Other
+bundlers need the same three things: one output file, assets as data URLs,
+and names without hashes.
 
 ## Hypermedia widgets: htmx, fixi, Django views
 
