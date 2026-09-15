@@ -17,6 +17,21 @@
 - `@mcp.tool(visibility="app" | "model" | [...])` publishes
   `_meta.ui.visibility`; app-only tools are hidden from the model by the host
   and callable by the server's widgets. New suite `tests/test_ui.py`.
+- `Unauthorized(error="insufficient_scope")` and the new
+  `Unauthorized.insufficient_scope(scope)` answer `403`, as RFC 6750 and the
+  MCP authorization spec ask for a token that lacks a scope; the other
+  `Unauthorized` forms stay `401`.
+- `micromcp.contrib.oauth.OAuth` validates tokens from an identity provider
+  (`pip install "micromcp[oauth]"`, PyJWT 2.14+): discovery in the MCP
+  clients' URL order with an exact issuer check; signature, issuer,
+  audience, expiry, and not-before checks with asymmetric algorithms only;
+  cached keys with rate-limited refetches; `503` rather than `401` when the
+  provider is unreachable; `requires()` guards and `check()` for the `403`
+  step-up challenge, with `implies=` scope hierarchies; opaque tokens by
+  introspection; `OAuth.static()` for development; `discover()` warnings
+  for providers MCP clients cannot sign in with; and `metadata` for
+  `resource_metadata=`. Not in the single-file bundle. New suite
+  `tests/test_oauth.py`.
 
 ### MCP Apps: `micromcp.apps` (experimental)
 - A subpackage imported only on request (`from micromcp.apps import ...`),

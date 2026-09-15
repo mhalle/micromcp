@@ -28,7 +28,7 @@ INVALID_PARAMS = -32602
 INTERNAL_ERROR = -32603
 HEADER_MISMATCH = -32020         # spec-allocated
 UNSUPPORTED_VERSION = -32022     # spec-allocated; must carry data.supported + data.requested
-UNAUTHORIZED = -32001            # implementation-defined range; travels under HTTP 401
+UNAUTHORIZED = -32001            # implementation-defined; HTTP 401 (403 for insufficient_scope)
 
 # Methods that exist only in the initialize-handshake era (2024-11-05 .. 2025-11-25).
 # Refused precisely by default; answered per request under legacy="stateless".
