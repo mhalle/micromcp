@@ -26,6 +26,7 @@ from the server, `fragment(..., context=...)` does.
 from __future__ import annotations
 
 import html as _html
+import itertools
 import json
 import logging
 import os
@@ -99,13 +100,36 @@ def _asset(item, what):
 
 
 _SCRIPT_END_RE = re.compile(r"</(script)", re.I)
+_SCRIPT_START_RE = re.compile(r"<script[\s/>]")
+
+
+def _double_escaped(source) -> bool:
+    """`<!--` followed by `<script` before the next `-->`: inside a script
+    element that makes a browser skip the next `</script>`, so the rest of
+    the page is swallowed as script."""
+    low = source.lower()
+    i = low.find("<!--")
+    while i >= 0:
+        end = low.find("-->", i + 4)
+        if _SCRIPT_START_RE.search(low, i + 4, len(low) if end < 0 else end):
+            return True
+        if end < 0:
+            return False
+        i = low.find("<!--", end + 3)
+    return False
 
 
 def _script(source, module=False, escape=False):
     """An inline script element. `</script` inside the source would end the
     element early: it is refused, or with `escape` rewritten as `<\\/script`,
     which means the same in the strings, templates, and regular expressions
-    where it occurs (bundlers such as Vite emit it that way)."""
+    where it occurs (bundlers such as Vite emit it that way), except in the
+    raw text of a `String.raw` template, which keeps the backslash. `<!--`
+    followed by `<script` is refused either way."""
+    if _double_escaped(source):
+        raise ValueError("an inlined script contains '<!--' followed by '<script', which makes "
+                         "a browser swallow the rest of the page; break the sequence up in the "
+                         "source")
     if escape:
         source = _SCRIPT_END_RE.sub(r"<\\/\1", source)
     elif "</script" in source.lower():
@@ -179,10 +203,18 @@ def tool_url(name: str, /, **args) -> str:
 
 # ── pages from bundlers ─────────────────────────────────────────────────────
 
-def _read(value):
-    """A page argument given as a path is the file's text."""
+_FILENAME_RE = re.compile(r"[^<>\s]+\.html?", re.I)
+
+
+def _read(value, what):
+    """A page argument given as a path is the file's text, a leading BOM
+    dropped (in a page built around it, it would put the browser in quirks
+    mode). A str that is only a file name is refused, not taken for a page."""
     if isinstance(value, os.PathLike):
-        return pathlib.Path(value).read_text(encoding="utf-8")
+        return pathlib.Path(value).read_text(encoding="utf-8-sig")
+    if isinstance(value, str) and _FILENAME_RE.fullmatch(value.strip()):
+        raise ValueError(f"{what} {value!r} looks like a file name; pass "
+                         f"pathlib.Path({value!r}) to read the file")
     return value
 
 
@@ -200,9 +232,33 @@ def _bridge_parts(route, fetch) -> list:
     return parts
 
 
-_HEAD_RE = re.compile(r"<head\b[^>]*>", re.I)
-_HTML_RE = re.compile(r"<html\b[^>]*>", re.I)
-_DOCTYPE_RE = re.compile(r"\s*<!doctype[^>]*>", re.I)
+class _Start(HTMLParser):
+    """Where a page's head begins, found by parsing, so that a `<head>` in a
+    comment, a script, or an attribute value is not taken for it: the end of
+    the first `<head>` start tag, else of the `<html>` start tag, else of the
+    doctype."""
+
+    def __init__(self, doc):
+        super().__init__(convert_charrefs=True)
+        self._lines = [0] + [m.end() for m in re.finditer("\n", doc)]
+        self.head = self.html = self.doctype = None
+        self.feed(doc)
+        self.close()
+
+    def _at(self):
+        line, col = self.getpos()                 # where the construct being handled starts
+        return self._lines[line - 1] + col
+
+    def handle_starttag(self, tag, attrs):
+        end = self._at() + len(self.get_starttag_text())
+        if tag == "head" and self.head is None:
+            self.head = end
+        elif tag == "html" and self.html is None:
+            self.html = end
+
+    def handle_decl(self, decl):
+        if self.doctype is None and decl.lower().startswith("doctype"):
+            self.doctype = self._at() + len(decl) + 3        # "<!" decl ">"
 
 
 def _with_bridge(doc, route, fetch) -> str:
@@ -210,43 +266,62 @@ def _with_bridge(doc, route, fetch) -> str:
     if BRIDGE_JS in doc:
         raise ValueError("html already carries micromcp's bridge; leave bridge=True off")
     prelude = "".join(_bridge_parts(route, fetch)) + _script(BRIDGE_JS)
-    m = _HEAD_RE.search(doc) or _HTML_RE.search(doc) or _DOCTYPE_RE.match(doc)
-    at = m.end() if m else 0
+    start = _Start(doc)
+    at = next((p for p in (start.head, start.html, start.doctype) if p is not None), 0)
     return doc[:at] + prelude + doc[at:]
 
 
 # Attributes whose URL a page loads, by element. `a`, `form`, and hypermedia
 # attributes (hx-get, fx-action) navigate or go through the bridge; they are not loads.
-_LOADING = {"script": ("src",), "img": ("src", "srcset"), "source": ("src", "srcset"),
+# `<image>` is HTML's alias of `<img>`; `input src` loads only for type=image.
+_LOADING = {"script": ("src", "href", "xlink:href"), "img": ("src", "srcset"),
+            "image": ("src", "href", "xlink:href"), "source": ("src", "srcset"),
             "video": ("src", "poster"), "audio": ("src",), "track": ("src",),
-            "iframe": ("src",), "embed": ("src",), "object": ("data",), "input": ("src",),
-            "image": ("href", "xlink:href"), "use": ("href", "xlink:href"),
-            "feimage": ("href", "xlink:href")}
+            "iframe": ("src",), "embed": ("src",), "object": ("data",),
+            "use": ("href", "xlink:href"), "feimage": ("href", "xlink:href"),
+            "body": ("background",), "table": ("background",), "td": ("background",),
+            "th": ("background",)}
 _LINK_LOADS = {"stylesheet", "modulepreload", "preload"}   # a missing icon breaks nothing
+_FOREIGN = {"svg", "math"}                  # a <base> in there is not the page's base
 _SCHEME_RE = re.compile(r"[a-z][a-z0-9+.-]*:", re.I)
-_CSS_URL_RE = re.compile(r"""url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\)"""
-                         r"""|@import\s+["']([^"']*)["']""", re.I)
-_JS_IMPORT_RE = re.compile(r"""(?:\bfrom|\bimport)\s*\(?\s*["']((?:\.{1,2})?/[^"'\s]*)["']""")
-_JS_META_URL_RE = re.compile(r"""\bnew\s+URL\(\s*["']([^"']+)["']\s*,\s*import\.meta\.url""")
-_JS_ASSET_RE = re.compile(r"""["'](\.{1,2}/[\w./@%+-]+\.(?:png|jpe?g|gif|svg|webp|avif|ico|"""
-                          r"""bmp|woff2?|ttf|otf|eot|css|m?js|json|wasm|mp3|mp4|webm|ogg|wav))["']""",
-                          re.I)
+_URL_TRIM = "".join(map(chr, range(0x21)))  # what a browser trims around a URL
+_HTML_WS = " \t\n\r\f"
+_HTML_TOKEN_RE = re.compile(r"[^ \t\n\r\f]+")
+_CSS_COMMENT_RE = re.compile(r"/\*[^*]*\*+(?:[^/*][^*]*\*+)*/")
+_CSS_URL_RE = re.compile(r"""url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s("']*))\s*\)"""
+                         r"""|@import\s*["']([^"']*)["']""", re.I)
+_CSS_IMAGE_SET_RE = re.compile(r"image-set\(([^)]*)\)", re.I)
+_CSS_STRING_RE = re.compile(r"""["']([^"']*)["']""")
+# Inline-script heuristics. Quotes include backticks, which Vite 8 writes for most
+# strings; a string followed by `:` or `(` is an object key or method, not a load.
+_JS_IMPORT_RE = re.compile(r"""(?:\bfrom|\bimport)\s*(?:\(\s*)?(["'`])"""
+                           r"""((?:\.{1,2})?/[^"'`\s$]*)\1""")
+_JS_META_URL_RE = re.compile(r"""\bnew\s+URL\(\s*(?:/\*[^*]*\*+(?:[^/*][^*]*\*+)*/\s*)?"""
+                             r"""(["'`])([^"'`$]+)\1\s*,\s*(?:(?:``|""|'')\s*\+\s*)?"""
+                             r"""(?:self\.location|import\.meta\.url)""")
+_JS_ASSET_RE = re.compile(r"""(["'`])((?:\.{1,2})?/[\w./@%+-]+\.(?:png|jpe?g|gif|svg|webp|"""
+                          r"""avif|ico|bmp|woff2?|ttf|otf|eot|css|m?js|json|wasm|mp3|mp4|"""
+                          r"""webm|ogg|wav))\1(?!\s*[:(])""", re.I)
 
 
 def _relative(url) -> bool:
-    url = url.strip()
+    """As a browser's URL parser sees it: C0 controls and spaces trimmed, tabs
+    and newlines removed, then relative unless it has a scheme or is a
+    #fragment."""
+    url = re.sub(r"[\t\n\r]", "", url.strip(_URL_TRIM))
     return bool(url) and not url.startswith("#") and not _SCHEME_RE.match(url)
 
 
 def _srcset(value) -> list:
     """The URLs of a srcset: comma-separated candidates, each a URL and then
-    optional descriptors (a data: URL may itself contain a comma)."""
+    optional descriptors (a data: URL may itself contain a comma). Only HTML
+    whitespace separates them, as in a browser."""
     urls, rest = [], value
     while True:
-        rest = rest.lstrip(" \t\n\r\f,")
+        rest = rest.lstrip(_HTML_WS + ",")
         if not rest:
             return urls
-        url = re.match(r"\S+", rest).group(0)
+        url = _HTML_TOKEN_RE.match(rest).group(0)
         rest = rest[len(url):]
         if url.endswith(","):
             url = url.rstrip(",")
@@ -257,23 +332,46 @@ def _srcset(value) -> list:
 
 
 def _css_urls(css) -> list:
-    return [next(g for g in m.groups() if g is not None) for m in _CSS_URL_RE.finditer(css)]
+    """The URLs a stylesheet loads: `url()`, `@import`, and `image-set()`
+    strings, comments aside."""
+    css = _CSS_COMMENT_RE.sub(" ", css)
+    urls = [next(g for g in m.groups() if g is not None) for m in _CSS_URL_RE.finditer(css)]
+    for m in _CSS_IMAGE_SET_RE.finditer(css):
+        urls += [s.group(1) for s in _CSS_STRING_RE.finditer(m.group(1))]
+    return urls
 
 
 class _Loads(HTMLParser):
-    """The URLs a page loads (with where they appear), its `<base href>`,
-    its import maps, and the text of its inline scripts."""
+    """The URLs a page loads (with where they appear), its `<base href>` and
+    how many loads come before it, and the text of its inline scripts."""
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.base, self.loads, self.scripts, self._open, self._buf = None, [], [], None, []
+        self.base = self.base_at = None
+        self.loads, self.scripts, self._open, self._buf = [], [], None, []
+        self._noscript = self._template = self._foreign = 0
 
     def handle_starttag(self, tag, attrs):
-        a = {k: v for k, v in attrs if v is not None}
-        if tag == "base" and "href" in a and self.base is None:
-            self.base = a["href"].strip()
+        a = {}
+        for k, v in attrs:                        # a browser keeps the first of a duplicate
+            a.setdefault(k, "" if v is None else v)
+        if tag == "noscript":
+            self._noscript += 1
+        elif tag == "template":
+            self._template += 1
+        elif tag in _FOREIGN:
+            self._foreign += 1
+        if tag == "base":                         # the first with href is the page's base
+            if self.base is None and "href" in a and not (
+                    self._noscript or self._template or self._foreign):
+                self.base, self.base_at = a["href"].strip(_URL_TRIM), len(self.loads)
+            return
+        if self._noscript:                        # text, not elements, while scripts run
+            return
         names = _LOADING.get(tag, ())
-        if tag == "link" and set(a.get("rel", "").lower().split()) & _LINK_LOADS:
+        if tag == "input" and a.get("type", "").strip().lower() == "image":
+            names = ("src",)
+        elif tag == "link" and set(a.get("rel", "").lower().split()) & _LINK_LOADS:
             names = ("href", "imagesrcset")
         for name in names:
             if a.get(name):
@@ -281,6 +379,11 @@ class _Loads(HTMLParser):
                     self.loads.append((url, f"<{tag} {name}>"))
         for url in _css_urls(a.get("style", "")):
             self.loads.append((url, f"<{tag} style>"))
+        if tag == "iframe" and a.get("srcdoc"):   # it resolves against this page
+            inner = _Loads()
+            inner.feed(a["srcdoc"])
+            inner.close()
+            self.loads += [(url, f"<iframe srcdoc> {where}") for url, where in inner.loads]
         if tag in ("script", "style"):
             self._open, self._buf = (tag, a.get("type", "").strip().lower()), []
 
@@ -289,6 +392,12 @@ class _Loads(HTMLParser):
             self._buf.append(data)
 
     def handle_endtag(self, tag):
+        if tag == "noscript" and self._noscript:
+            self._noscript -= 1
+        elif tag == "template" and self._template:
+            self._template -= 1
+        elif tag in _FOREIGN and self._foreign:
+            self._foreign -= 1
         if not self._open or tag != self._open[0]:
             return
         (kind, kind_type), text, self._open = self._open, "".join(self._buf), None
@@ -299,7 +408,11 @@ class _Loads(HTMLParser):
                 spec = json.loads(text)
             except ValueError:
                 return
-            maps = [spec.get("imports") or {}, *(spec.get("scopes") or {}).values()]
+            if not isinstance(spec, dict):
+                return
+            maps = [spec.get("imports")]
+            if isinstance(spec.get("scopes"), dict):
+                maps += list(spec["scopes"].values())
             self.loads += [(url, "<script type=importmap>") for m in maps if isinstance(m, dict)
                            for url in m.values() if isinstance(url, str)]
         elif kind_type in ("", "module", "text/javascript", "application/javascript"):
@@ -310,17 +423,20 @@ def _check_urls(doc, what):
     """Refuse a page that loads a relative URL: a widget is a document with no
     origin, so the host cannot fetch it (a bundler's split chunks, hashed
     assets, and `public/` files all end up this way). Relative paths inside
-    inline scripts are only logged, since they may be mere strings. A page with
-    an https `<base href>` resolves relative URLs against it and is not checked."""
+    inline scripts are only logged, since they may be mere strings. Loads that
+    follow a valid https `<base href>` resolve against it and pass."""
     parser = _Loads()
     try:
         parser.feed(doc)
         parser.close()
-    except Exception:                    # an unparsable page is the host's problem to show
+    except Exception as e:               # never a silent pass: say the page went unchecked
+        log.warning("%s: its page could not be checked for relative URLs (%s: %s)", what,
+                    type(e).__name__, e)
         return
-    if parser.base and parser.base.lower().startswith("https://"):
-        return
-    bad = [(url, where) for url, where in parser.loads if _relative(url)]
+    base = urlsplit(parser.base or "")
+    exempt = parser.base_at if base.scheme.lower() == "https" and base.hostname else None
+    bad = [(url, where) for i, (url, where) in enumerate(parser.loads)
+           if _relative(url) and (exempt is None or i < exempt)]
     if bad:
         url, where = bad[0]
         more = f" (and {len(bad) - 1} more)" if len(bad) > 1 else ""
@@ -328,20 +444,52 @@ def _check_urls(doc, what):
                          f"has no origin to load it from: inline it (data: URLs, or "
                          f"scripts=/styles= with a pathlib.Path) or load it from an https URL. "
                          f"See 'Bundling widgets' in docs/apps.md")
+    if exempt is not None:
+        return
     for source in parser.scripts:
-        refs = {m.group(1) for m in _JS_IMPORT_RE.finditer(source)}
-        refs |= {m.group(1) for m in _JS_META_URL_RE.finditer(source) if _relative(m.group(1))}
-        refs |= {m.group(1) for m in _JS_ASSET_RE.finditer(source)}
+        refs = {m.group(2) for m in _JS_IMPORT_RE.finditer(source)}
+        refs |= {m.group(2) for m in _JS_META_URL_RE.finditer(source) if _relative(m.group(2))}
+        refs |= {m.group(2) for m in _JS_ASSET_RE.finditer(source)}
         if refs:
             log.warning("%s: an inline script refers to %s, relative paths a widget cannot "
                         "load (ignore this if they are only strings)", what,
                         ", ".join(sorted(refs)[:5]) + (" ..." if len(refs) > 5 else ""))
 
 
+_ASSET_SUFFIXES = {".js", ".mjs", ".css", ".wasm", ".json", ".png", ".jpg", ".jpeg", ".gif",
+                   ".svg", ".webp", ".avif", ".ico", ".bmp", ".woff", ".woff2", ".ttf", ".otf",
+                   ".eot", ".mp3", ".mp4", ".webm", ".ogg", ".wav"}
+
+
+def _leftovers(what, checked, passed):
+    """Warn about assets next to a page or module that was passed as a path but
+    not passed themselves: a working build folder holds only what the widget
+    inlines, so a split chunk, a worker, or a copied `public/` file there is
+    something the widget will fail to load. Source folders (a package.json,
+    pyproject.toml, or Python file) are skipped, and so are sibling pages."""
+    passed = {pathlib.Path(p).resolve() for p in passed if isinstance(p, os.PathLike)}
+    for folder in {pathlib.Path(p).resolve().parent for p in checked if isinstance(p, os.PathLike)}:
+        if (folder / "package.json").exists() or (folder / "pyproject.toml").exists() \
+                or next(folder.glob("*.py"), None):
+            continue
+        extra = []
+        for f in itertools.islice(folder.rglob("*"), 500):
+            rel = f.relative_to(folder)
+            if len(rel.parts) <= 2 and f.suffix.lower() in _ASSET_SUFFIXES and f not in passed \
+                    and not any(p.startswith(".") or p == "node_modules" for p in rel.parts) \
+                    and f.is_file():
+                extra.append(rel.as_posix())
+        if extra:
+            log.warning("%s: %s also holds %s, which the widget cannot load (a bundler's split "
+                        "chunks, workers, and public/ files end up there); see 'Bundling "
+                        "widgets' in docs/apps.md", what, folder,
+                        ", ".join(sorted(extra)[:5]) + (" ..." if len(extra) > 5 else ""))
+
+
 def _document(body, *, title, head, scripts, modules, styles, route, fetch, imports=None,
               escape_scripts=False):
     """The widget page and the https origins it loads from."""
-    body, head = _markup(_read(body), "body"), _markup(head, "head")
+    body, head = _markup(_read(body, "body"), "body"), _markup(head, "head")
     if not issubclass(type(title), str):
         raise TypeError("title must be a str")
     title = str.__str__(title)           # plain text: a Markup title would be escaped twice
@@ -458,7 +606,7 @@ class Widget:
             if not bridge and (route or fetch != "hooks"):
                 raise TypeError("route/fetch are settings of micromcp's bridge: with html=, "
                                 "they need bridge=True")
-            self.html, origins = _markup(_read(html), "html"), set()
+            self.html, origins = _markup(_read(html, "html"), "html"), set()
             if bridge:
                 self.html = _with_bridge(self.html, route, fetch)
         else:
@@ -468,7 +616,16 @@ class Widget:
                                            modules=modules, styles=styles, route=route,
                                            fetch=fetch, imports=imports,
                                            escape_scripts=escape_scripts)
-        _check_urls(self.html, f"widget {name!r}")
+        what = f"widget {name!r}"
+        _check_urls(self.html, what)
+        if BRIDGE_JS in self.html and \
+                "ui/notifications/initialized" in self.html.replace(BRIDGE_JS, "", 1):
+            log.warning("%s: the page carries another MCP Apps client as well as micromcp's "
+                        "bridge (it names ui/notifications/initialized): that is two "
+                        "handshakes with the host. Use one: drop bridge=True, or the other "
+                        "client", what)
+        _leftovers(what, [html, body, *_items(modules)],
+                   [html, body, *_items(scripts), *_items(modules), *_items(styles)])
         domains = {}
         for k, v in (csp or {}).items():
             if k not in _CSP_KEYS:

@@ -309,6 +309,104 @@ check("... leaving one end tag per script element",
 check("BRIDGE_TYPES declares window.mcp",
       ("interface MCPBridge" in BRIDGE_TYPES, "var mcp: MCPBridge" in BRIDGE_TYPES), (True, True))
 
+# regressions from the adversarial round on the check
+import time  # noqa: E402
+
+for label, kw in [
+        ("a srcset with a non-breaking space, beside a relative script",
+         {"html": '<img srcset="\xa0x.png"><script src="/assets/app.js"></script>'}),
+        ("an import map that is a list, beside a relative script",
+         {"html": '<script type="importmap">[]</script><script src="/assets/app.js"></script>'}),
+        ("the first of two src attributes",
+         {"html": '<script src="app.js" src="https://cdn.example.com/app.js"></script>'}),
+        ("an <image> element", {"body": '<image src="logo.png">'}),
+        ("a body background", {"html": '<body background="bg.png"></body>'}),
+        ("an SVG script href", {"body": '<svg><script href="app.js"></script></svg>'}),
+        ("an input of type image", {"body": '<input type="image" src="go.png">'}),
+        ("@import with no space", {"body": "<p>x</p>", "styles": ['@import"base.css";']}),
+        ("image-set()", {"body": "<div style=\"background-image: image-set('bg.png' 1x)\"></div>"}),
+        ("a base inside <template>",
+         {"html": '<template><base href="https://cdn.example.com/"></template>'
+                  '<script src="app.js"></script>'}),
+        ("a base with no host", {"html": '<base href="https://"><script src="app.js"></script>'}),
+        ("a load before the base",
+         {"html": '<script src="app.js"></script><base href="https://cdn.example.com/">'}),
+        ("an iframe srcdoc", {"body": '<iframe srcdoc="&lt;img src=logo.png&gt;"></iframe>'}),
+        ("a URL behind a non-breaking space", {"body": '<img src="\xa0https://cdn.example.com/x.png">'})]:
+    check(f"refused: {label}", raises(lambda k=kw: Widget("adv", **k)), "ValueError")
+for label, kw in [
+        ("a url() in a CSS comment",
+         {"body": "<p>x</p>", "styles": ["/* was: url(bg.png) */ p{color:red}"]}),
+        ("noscript content", {"body": '<noscript><img src="pixel.gif"></noscript>'}),
+        ("an input that is not an image", {"body": '<input type="text" src="icon.png">'}),
+        ("a tab inside the scheme", {"body": '<img src="ht\ttps://cdn.example.com/x.png">'})]:
+    check(f"accepted: {label}", raises(lambda k=kw: Widget("adv", **k)), None)
+for label, page_html, before, after in [
+        ("a comment mentioning <head> before the head",
+         "<!-- the bridge goes in <head> --><html><head><title>t</title></head>"
+         "<body><script>window.app=1</script></body></html>", "--><html><head>", "<title>"),
+        ("a head attribute containing >",
+         '<html><head data-note="a>b"><title>t</title></head><body></body></html>',
+         'data-note="a>b">', "<title>"),
+        ("no head tag, and a script string with <head>",
+         '<!doctype html><script>var s = "<head>";</script>', "<!doctype html>", "<script>var s"),
+        ("a <head-nav> element and no head",
+         "<!doctype html><body><head-nav></head-nav><script>window.app=1</script></body>",
+         "<!doctype html>", "<head-nav>")]:
+    doc = Widget("placed", html=page_html, bridge=True).html
+    check(f"bridge placement: {label}",
+          doc.index(before) + len(before) <= doc.index(BRIDGE_JS) < doc.index(after), True)
+(bundle_dir / "bom.html").write_bytes(b"\xef\xbb\xbf<!doctype html><html><head></head></html>")
+check("a BOM in a page file is dropped",
+      Widget("bom", html=bundle_dir / "bom.html").html.startswith("<!doctype"), True)
+check("html= given a file name as a str is refused",
+      raises(lambda: Widget("strpath", html="ui/dist/index.html")), "ValueError")
+for esc in (False, True):
+    check(f"'<!--' then '<script' inside a script is refused (escape_scripts={esc})",
+          raises(lambda e=esc: Widget("dbl", body="<p>x</p>", modules=['window.a = "<!--<script>";'],
+                                      escape_scripts=e)), "ValueError")
+heard.clear()
+Widget("vite8", body="<p>x</p>",
+       modules=["import(`./a.js`); new Worker(new URL(`/assets/w-B0.js`,``+import.meta.url));"
+                ' img.src = `/public-logo.png`; const m = {"./keyed.js": 1, "./method.js"(x) {}};'])
+said = " ".join(m for m in heard if "'vite8'" in m)
+check("Vite 8's backtick forms are warned about",
+      ("./a.js" in said, "/assets/w-B0.js" in said, "/public-logo.png" in said), (True, True, True))
+check("... but not object keys or methods", ("./keyed.js" in said, "./method.js" in said),
+      (False, False))
+build = pathlib.Path(tempfile.mkdtemp())
+(build / "widget.js").write_text("window.w = 1")
+(build / "widget.css").write_text("p{color:red}")
+heard.clear()
+Widget("clean-build", body="<p>x</p>", modules=[build / "widget.js"], styles=[build / "widget.css"])
+check("a build folder holding only what was passed is quiet",
+      [m for m in heard if "'clean-build'" in m], [])
+(build / "assets").mkdir()
+(build / "assets" / "w-a1.js").write_text("x")
+(build / "widget.js.map").write_text("{}")
+heard.clear()
+Widget("leftover", body="<p>x</p>", modules=[build / "widget.js"], styles=[build / "widget.css"])
+check("files left beside a module are warned about (source maps are not)",
+      [("assets/w-a1.js" in m, ".map" in m) for m in heard if "'leftover'" in m], [(True, False)])
+templates = pathlib.Path(tempfile.mkdtemp())
+for n in ("a.html", "b.html"):
+    (templates / n).write_text("<p>x</p>")
+(templates / "shared.js").write_text("window.s = 1")
+(templates / "server.py").write_text("")
+heard.clear()
+Widget("hand-written", body=templates / "a.html")
+check("a source folder of hand-written pages is quiet",
+      [m for m in heard if "'hand-written'" in m], [])
+heard.clear()
+Widget("two", html='<html><head></head><body><script type="module">'
+                   'const M = "ui/notifications/initialized";</script></body></html>', bridge=True)
+check("another MCP Apps client beside bridge=True is warned about",
+      any("'two'" in m and "two handshakes" in m for m in heard), True)
+t0 = time.monotonic()
+raises(lambda: Widget("slow1", body="<p>x</p>", styles=["url(" * 20000]))
+raises(lambda: Widget("slow2", body="<p>x</p>", modules=["import" + " " * 40000]))
+check("pathological styles and scripts stay fast", time.monotonic() - t0 < 2.0, True)
+
 # ── widget pages ───────────────────────────────────────────────────────────
 print("pages")
 doc = page("<p>x</p>", title="A & B", head="<style></style>", scripts=["var mine = 1;"])
