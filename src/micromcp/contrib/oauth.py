@@ -577,9 +577,9 @@ class OAuth:
         """A guard: the token must carry every one of `scopes` (a broader scope
         that `implies` one counts). Without them the tool is left out of
         listings, and a direct call answers 403 `insufficient_scope` naming all
-        of them, which lets the client step up its authorization. Give one
-        `requires()` all of a tool's scopes: guards stop at the first that
-        fails, so a second would go unnamed."""
+        of them, which lets the client step up its authorization. Several
+        `requires()` on one tool answer with one challenge naming all their
+        scopes."""
         need = _words(scopes, "requires")
 
         def guard(principal):
@@ -590,9 +590,8 @@ class OAuth:
     def check(self, principal, *scopes):
         """The same test inside a handler, for a tool that stays listed: raises
         `Unauthorized` 403 `insufficient_scope` naming every one of `scopes`.
-        In a streaming (`Context`) tool the stream is open before the handler
-        runs, so the failure can only travel in-band, without the 403 a client
-        steps up on: guard streaming tools with `requires()` instead."""
+        In a streaming (`Context`) tool, call it first thing: once the stream
+        is open the failure can only travel in-band, without the 403."""
         self._require(principal, _words(scopes, "check"))
 
     def _require(self, principal, need):

@@ -81,21 +81,25 @@ class ASGIServer(_Core):
 
         early, req = await self.prepare(http_method, headers, raw)
         if early is None and self.wants_stream(req, headers):
-            return await self._stream(req, headers, receive, send)
+            return await self._stream(req, headers, receive, send, reply)
         out = early if early is not None else await self.respond(req, headers=headers)
         status, payload = out
         await reply(status, payload, getattr(out, "headers", ()))
 
-    async def _stream(self, req, headers, receive, send):
+    async def _stream(self, req, headers, receive, send, reply):
         """Answer one validated request with a request-scoped SSE stream.
 
         Notifications first, then the final JSON-RPC response, which closes the
-        stream. Closing the stream from the client side is cancellation: the
-        handler task is cancelled and nothing further is sent. The frame queue
-        is bounded, so a chatty handler paces itself against the socket instead
-        of growing memory — and always reaches a cancellation point. A comment
-        frame goes out after `keepalive` seconds of silence so proxies keep the
-        connection open through a long-running handler.
+        stream. The head waits up to `_HEAD_HOLD` seconds for the first frame:
+        a handler that fails with an `Error` at its start, before any
+        notification (a 403 from a scope check, say), is answered by `reply`
+        with that status and its headers, not in-band. Closing the stream from
+        the client side is cancellation: the handler task is cancelled and
+        nothing further is sent. The frame queue is bounded, so a chatty
+        handler paces itself against the socket instead of growing memory — and
+        always reaches a cancellation point. A comment frame goes out after
+        `keepalive` seconds of silence so proxies keep the connection open
+        through a long-running handler.
         """
         hdrs = [(b"content-type", b"text/event-stream"),
                 (b"cache-control", b"no-cache"),
@@ -103,7 +107,9 @@ class ASGIServer(_Core):
                 (b"x-accel-buffering", b"no")]
         hdrs += [(k.lower().encode("latin-1"), v.encode("latin-1", "replace"))
                  for k, v in self.stream_headers(req, headers)]
-        await send({"type": "http.response.start", "status": 200, "headers": hdrs})
+
+        async def start():
+            await send({"type": "http.response.start", "status": 200, "headers": hdrs})
 
         q, worker, stop = self.spawn(req, headers)
 
@@ -122,18 +128,23 @@ class ASGIServer(_Core):
 
         watcher = asyncio.create_task(disconnected())
         nxt = None
-        gone = False
+        gone = opened = False
         try:
             while True:
                 if nxt is None:
                     nxt = asyncio.create_task(q.get())
-                done, _ = await asyncio.wait({nxt, watcher}, timeout=self.keepalive,
+                wait = self.keepalive if opened else min(self.keepalive, self._HEAD_HOLD)
+                done, _ = await asyncio.wait({nxt, watcher}, timeout=wait,
                                              return_when=asyncio.FIRST_COMPLETED)
                 if watcher in done:            # client hung up: stop work, send nothing
                     nxt.cancel()
                     gone = True
                     break
-                if nxt not in done:            # silence: keep the connection alive
+                if nxt not in done:            # silence
+                    if not opened:             # the head has waited long enough
+                        await start()
+                        opened = True
+                        continue
                     if not await write(b": keepalive\n\n"):
                         gone = True
                         break
@@ -141,10 +152,20 @@ class ASGIServer(_Core):
                 item, nxt = nxt.result(), None
                 if item is None:
                     break
-                if not await write(item):
+                if not opened and isinstance(item, tuple) and item[0] != 200:
+                    # Failed before its first notification: an ordinary reply,
+                    # with the status and headers an in-band frame would lose.
+                    await reply(item[0], item[1], getattr(item, "headers", ()))
+                    return
+                if not opened:
+                    await start()
+                    opened = True
+                if not await write(self._frame(item, req)):
                     gone = True
                     break
             if not gone:
+                if not opened:
+                    await start()
                 await send({"type": "http.response.body", "body": b"", "more_body": False})
         finally:
             watcher.cancel()

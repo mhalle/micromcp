@@ -62,10 +62,11 @@ class Unauthorized(Error):
     "insufficient_scope") and `error_description` are the RFC 6750 parameters.
     Every parameter is reduced to printable ASCII before it reaches a header.
 
-    Raising inside a tool that streams (a `Context` tool answered over SSE)
-    cannot change the HTTP status any more: the error travels in-band as a
-    `-32001` frame without the challenge. Authenticate and guard before the
-    stream opens; both run before any byte is committed.
+    A tool that streams (a `Context` tool answered over SSE) keeps the status
+    and challenge when it raises at its start, before any notification (the
+    response head waits up to a second for one); after that the error travels
+    in-band as a `-32001` frame without the challenge. Several guards that raise the
+    `insufficient_scope` form answer with one 403 naming all their scopes.
     """
 
     def __init__(self, message="Authentication required", *, resource_metadata=None,

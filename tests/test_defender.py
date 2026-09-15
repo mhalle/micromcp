@@ -87,6 +87,8 @@ async def asgi(app, headers, raw, method="POST", script=None, path="/"):
     async def send(m):
         sent.append(m)
     await app(scope, receive, send)
+    if not sent:                          # nothing at all, e.g. the client left first
+        return None, {}, b"", calls["n"]
     status = sent[0]["status"]
     hdrs = {k.decode(): v.decode() for k, v in sent[0]["headers"]}
     data = b"".join(m.get("body", b"") for m in sent[1:])
@@ -251,7 +253,7 @@ def untested_defenses():
                                             script=[{"type": "http.request", "body": json.dumps(body("tools/call", {"name": "stubborn", "arguments": {}}, token="t")).encode(), "more_body": False}, hangup]))
     finally:
         pass
-    check("stream opened then client hung up", (st, hd.get("content-type")), (200, "text/event-stream"))
+    check("client hung up before the first frame: nothing was sent", (st, hd.get("content-type")), (None, None))
     check("ignored cancellation was logged", any("ignored cancellation" in x for x in logcap.seen), True)
 
     print("— U10 the notification check proves the tool is wired (H3 strengthening) —")

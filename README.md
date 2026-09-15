@@ -226,7 +226,11 @@ Behaviors worth knowing:
 - Streaming needs the client's `Accept` to admit `text/event-stream`; otherwise
   the call is answered with plain JSON and notifications are dropped.
   Validation, Origin, and authentication all run before the stream is
-  committed, so a rejection keeps its real HTTP status.
+  committed, so a rejection keeps its real HTTP status. The response head
+  also waits up to a second for the handler's first notification, so an
+  `Error` a tool raises at its start, such as a `403` from a scope check,
+  keeps its status and headers too; once the stream is open, errors travel
+  in-band.
 - The frame queue is bounded, so a chatty handler paces itself against the
   socket instead of growing memory, and always reaches a cancellation point.
   Cancellation is cooperative: an `async` handler that swallows
@@ -303,10 +307,13 @@ server answers. If an outer router mounts the server under a prefix, requests
 for the well-known path never reach it: give the outer app a route for it, or
 run the server at the root with `path=`. A challenge with no URL at all is logged once as a
 warning: MCP clients cannot start OAuth from a bare `Bearer`. Guards may
-raise `Unauthorized` too, and do so before any byte is committed. A tool that
-raises it after its SSE stream has opened cannot change the status any more;
-the error travels in-band, which is why authentication and guards are the
-place for it.
+raise `Unauthorized` too, and do so before any byte is committed; when
+several guards on one entry raise `insufficient_scope`, the `403` names all
+their scopes. A streaming tool may raise it at its start, before any
+notification (the head waits up to a second for one); after that it cannot
+change the status any more and the error travels in-band. A request refused for its protocol version (`-32022`) is answered
+by `authenticate` first, so an SDK client that falls back to the 2025
+handshake after a failed probe sees the `401` or `503`, not a version error.
 
 ```python
 from micromcp import Unauthorized
@@ -370,21 +377,17 @@ seconds.
 
 `auth.requires(...)` is a guard: a tool the token cannot use is left out of
 listings, and a direct call is `403 insufficient_scope` naming every scope
-the tool needs, which lets the client step up. Give one `requires()` all of
-a tool's scopes: guards stop at the first that fails. `auth.check(who, ...)`
-does the same inside a handler, for a tool that should stay listed; in a
-streaming (`Context`) tool the stream is already open, so a failed `check()`
-travels in-band without the `403`, and `requires()` is the one to use.
+the tool needs, which lets the client step up; several `requires()` on one
+tool answer with one challenge naming all their scopes. `auth.check(who,
+...)` does the same inside a handler, for a tool that should stay listed; in
+a streaming (`Context`) tool, call it first thing, before any notification.
 `implies=` declares a scope hierarchy (`{"todos:admin": ["todos:write"]}`).
 `introspection=(client_id, secret)` validates opaque tokens at the
 provider's introspection endpoint instead; answers must name this server in
 `aud` and are reused for up to a minute, so a token revoked at the provider
 keeps working that long. For development and tests,
 `OAuth.static({"dev-token": {"sub": "me", "scope": "todos:write"}})` stands in
-for a provider and yields the same principal. During an outage, an official
-SDK client connecting in its default mode may report a protocol-version
-error rather than the `503` (it retries with the 2025 handshake on any
-error); with `legacy="stateless"` it reports the outage.
+for a provider and yields the same principal.
 
 ## Mounting
 

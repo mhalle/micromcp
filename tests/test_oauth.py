@@ -7,7 +7,8 @@ sign-in.
 import asyncio, base64, collections, concurrent.futures, hashlib, hmac, http.server, inspect, io
 import json, logging, sys, threading, time
 from urllib.parse import parse_qs
-from micromcp import MCP, Server, Principal, Unauthorized, PROTOCOL, META_VER, META_CAPS, WELL_KNOWN
+from micromcp import (MCP, Server, ASGIServer, Context, Error, Principal, Unauthorized, PROTOCOL,
+                      META_VER, META_CAPS, WELL_KNOWN)
 from _helpers import free_port
 
 OK = FAIL = 0
@@ -109,6 +110,138 @@ check("... with the step-up challenge", h.get("www-authenticate"),
       f'Bearer resource_metadata="{WK}", scope="files:write", error="insufficient_scope", '
       f'error_description="{STEP_UP}"')
 check("... and -32001 in the body", j["error"]["code"], -32001)
+
+print("streaming tools keep an early Error's status (core)")
+STREAM_HDRS = {"content-type": "application/json", "accept": "application/json, text/event-stream",
+               "mcp-protocol-version": PROTOCOL, "mcp-method": "tools/call"}
+
+
+def stream_body(name):
+    return json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                       "params": {"name": name, "arguments": {},
+                                  "_meta": {META_VER: PROTOCOL, META_CAPS: {}}}}).encode()
+
+
+def asgi_call(app, name):
+    """One ASGI request; (status, headers, body)."""
+    hdrs = {**STREAM_HDRS, "mcp-name": name}
+    scope = {"type": "http", "method": "POST", "path": "/mcp",
+             "headers": [(k.encode(), v.encode()) for k, v in hdrs.items()]}
+    msgs, sent = [{"type": "http.request", "body": stream_body(name), "more_body": False}], []
+
+    async def receive():
+        if msgs:
+            return msgs.pop(0)
+        await asyncio.sleep(3600)
+
+    async def send(m):
+        sent.append(m)
+    asyncio.run(app(scope, receive, send))
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    return (start["status"], {k.decode(): v.decode() for k, v in start["headers"]},
+            b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body"))
+
+
+@core.tool
+async def scoped(ctx: Context) -> dict:
+    """Checks a scope before it streams anything."""
+    raise Unauthorized.insufficient_scope("files:write")
+
+
+@core.tool
+async def chatty(ctx: Context) -> dict:
+    """Streams, then fails."""
+    await ctx.info("working")
+    raise Unauthorized.insufficient_scope("files:write")
+
+
+@core.tool
+async def quiet(ctx: Context) -> dict:
+    """Streams nothing, answers after a pause."""
+    await asyncio.sleep(0.3)
+    return {"done": True}
+
+
+aapp = ASGIServer(core, path="/mcp", keepalive=0.1,
+                  resource_metadata={"resource": RESOURCE, "authorization_servers": ["https://as.x"]})
+s, h, b = asgi_call(aapp, "scoped")
+check("a Context tool failing before its first notification keeps its 403",
+      (s, h.get("content-type"), 'error="insufficient_scope"' in h.get("www-authenticate", "")),
+      (403, "application/json", True))
+s, h, b = asgi_call(aapp, "chatty")
+check("... after a notification the stream is open and the error in-band",
+      (s, h.get("content-type"), b'"code": -32001' in b), (200, "text/event-stream", True))
+s, h, b = asgi_call(aapp, "quiet")
+check("a silent Context tool still streams, keepalives first",
+      (s, h.get("content-type"), b.startswith(b": keepalive"), b'"done": true' in b),
+      (200, "text/event-stream", True, True))
+
+
+async def begun(name):
+    early, req = await aapp.prepare("POST", {**STREAM_HDRS, "mcp-name": name}, stream_body(name))
+    out, chunks = await aapp.begin_stream(req, {**STREAM_HDRS, "mcp-name": name})
+    return (out[0] if out else None), (b"".join([c async for c in chunks]) if chunks else None)
+
+
+check("begin_stream (for adapters) hands back an early Error as a reply",
+      asyncio.run(begun("scoped")), (403, None))
+check("... and streams the rest", asyncio.run(begun("quiet"))[1].count(b"data:"), 1)
+
+print("several scope guards answer one 403 (core)")
+
+
+def needs(scope):
+    def guard(who):
+        raise Unauthorized.insufficient_scope(scope)
+    return guard
+
+
+@core.tool(guards=[needs("a:write"), needs("b:delete")])
+def both() -> dict:
+    """Needs two scopes, from two guards."""
+    return {}
+
+
+@core.tool(guards=[needs("a:write"), lambda who: False])
+def refused() -> dict:
+    """A scope guard, then one that plainly denies."""
+    return {}
+
+
+s, j, h = tool(capp, "both", None)
+check("two scope guards answer one 403 naming both scopes",
+      (s, 'scope="a:write b:delete"' in h.get("www-authenticate", "")), (403, True))
+check("... while a guard that plainly denies still hides the tool", tool(capp, "refused", None)[0],
+      404)
+
+print("a refused version is answered by authentication first (core)")
+INIT = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-11-25", "capabilities": {},
+                   "clientInfo": {"name": "sdk", "version": "2"}}}
+
+
+def handshake(app):
+    raw = json.dumps(INIT).encode()
+    env = {"REQUEST_METHOD": "POST", "PATH_INFO": "/mcp", "CONTENT_LENGTH": str(len(raw)),
+           "CONTENT_TYPE": "application/json", "wsgi.input": io.BytesIO(raw),
+           "HTTP_ACCEPT": "application/json, text/event-stream"}
+    box = {}
+    b"".join(app(env, lambda s, h: box.update(s=s)))
+    return int(box["s"].split()[0])
+
+
+def outage(headers):
+    raise Error(-32603, "authorization server unavailable", 503)
+
+
+def no_token(headers):
+    raise Unauthorized(scope="read")
+
+
+for label, authn, want in [("an outage", outage, 503), ("no token", no_token, 401),
+                           ("valid credentials", lambda headers: {"sub": "x"}, 400)]:
+    check(f"a refused 2025 handshake with {label} answers {want}",
+          handshake(Server(core, path="/mcp", authenticate=authn)), want)
 
 try:
     import jwt

@@ -38,6 +38,16 @@
 - `Unauthorized.status` is derived from `error`, so it can no longer
   disagree with the challenge; an authentication error answered while
   preparing a 2025-era request names that era in `MCP-Protocol-Version`.
+- A streaming (`Context`) tool's response head waits up to a second for its
+  first notification, so an `Error` raised at the tool's start, such as a
+  `403 insufficient_scope` from a scope check, keeps its status and headers
+  instead of travelling in-band. `begin_stream()`
+  gives adapters the same; the Django async view uses it under ASGI.
+- Several guards on one entry that raise `insufficient_scope` answer with a
+  single `403` naming all their scopes, so a client steps up once.
+- A request refused for its protocol version (`-32022`) is answered by
+  `authenticate` first: an SDK client that falls back to the 2025 handshake
+  after a failed modern probe sees the `401` or `503`, not a version error.
 
 ### MCP Apps: `micromcp.apps` (experimental)
 - A subpackage imported only on request (`from micromcp.apps import ...`),
