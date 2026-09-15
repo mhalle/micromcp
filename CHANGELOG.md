@@ -6,6 +6,13 @@
   infinity are refused as parse errors (`400`/`-32700`). JSON has no such
   values, but Python's parser accepts them, so they used to reach handlers
   (a `NaN` timeout never expires; a `NaN` comparison is always false).
+- `micromcp.__all__` is now the everyday API only: `MCP`, `Server`,
+  `ASGIServer`, `Context`, `Principal`, `Error`, `Unauthorized`, `result`,
+  `Result`, `embedded_resource`, `MCP_APP_MIME`, `django_view`,
+  `django_async_view`. Protocol constants, error codes, tunable defaults, and
+  `log` are still importable from `micromcp` by name (only
+  `from micromcp import *` no longer brings them in) and are documented in
+  the README's new "Constants" section.
 
 ## 0.1.0 — 2026-09-14 (tagged; not yet on PyPI)
 
