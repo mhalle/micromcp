@@ -1,13 +1,8 @@
-"""pytest entry point for the script-style suites.
+"""pytest entry point for the micromcp-apps script-style suites (see ../../tests).
 
 Each suite is a self-contained script that prints PASS/FAIL lines and exits
-non-zero on any failure; that style stays because it doubles as runnable
-documentation. Here each one becomes a pytest case, run in its own process
-from this directory (the gunicorn cases import their own module by name), with
-markers so CI can pick the subset an environment can support:
-
-    pytest -m unit              # stdlib only, no optional dependencies
-    pytest -m "not interop"     # everything that needs no mcp client
+non-zero on any failure; here each one becomes a pytest case, run in its own
+process from this directory.
 """
 import os
 import pathlib
@@ -19,17 +14,7 @@ import pytest
 HERE = pathlib.Path(__file__).parent
 
 SUITES = [
-    ("test_micromcp.py", ["unit"], 120),
-    ("ergonomics.py", ["unit"], 60),
-    ("test_ui.py", ["unit"], 60),
-    ("conform.py", ["conform"], 60),
-    ("interop.py", ["interop", "server"], 120),
-    ("test_asgi.py", ["interop", "server"], 180),
-    ("test_progress.py", ["interop", "server"], 180),
-    ("test_legacy.py", ["interop", "server"], 180),
-    ("harnesses.py", ["server"], 240),
-    ("test_hardening.py", ["server", "interop"], 600),
-    ("test_defender.py", ["server"], 300),
+    ("test_apps.py", ["unit"], 60),
 ]
 
 
