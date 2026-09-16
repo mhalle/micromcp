@@ -200,7 +200,8 @@ chart = Widget("chart", title="Chart", body='<div id="root"></div>',
 ```
 
 There is nothing else to configure: the widget's tools, and a server that
-shows it in the dev host, are in "The dev host" below.
+shows it in the dev host, are in "The dev host" below, and
+`examples/mcp_app_bundled.py` is exactly this recipe as a file you can run.
 
 Two things about that config are worth knowing. `assetFileNames:
 "widget.[ext]"` gives stable names to pass, but it also strips the content
@@ -671,6 +672,9 @@ context counter).
 
 ## Examples
 
+- `examples/mcp_app_bundled.py`: a Vite build (`examples/bundled_ui/`) plugged in as
+  one module and one stylesheet, with its image inlined — the recipe below, complete
+  and runnable
 - `examples/mcp_app_hypermedia.py`: the todo widget rendered with FastHTML
   components by app-only tools, and by Django views, plus the toolkit lab and
   the dev host

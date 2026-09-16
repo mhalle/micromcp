@@ -709,6 +709,14 @@ check("page inlines the bridge before the page's scripts",
 check("page escapes the title", "<title>A &amp; B</title>" in doc, True)
 check("page refuses a script that would close its tag",
       raises(lambda: page("", scripts=["x</SCRIPT >"])), "ValueError")
+# the bundled example: its committed build is what the docs' recipe produces
+EX = pathlib.Path(__file__).resolve().parent.parent / "examples" / "bundled_ui" / "dist"
+heard.clear()
+example = Widget("readings", title="Readings", body='<div class="wrap" id="root"></div>',
+                 modules=[EX / "widget.js"], styles=[EX / "widget.css"])
+check("examples/bundled_ui builds a widget with nothing left behind",
+      ([m for m in heard if "'readings'" in m], example.html.count("data:image/png")), ([], 2))
+
 check("a tool result's context reaches the model on both call paths",
       BRIDGE_JS.count("pushContext(") >= 3, True)
 node = shutil.which("node")

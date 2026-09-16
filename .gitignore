@@ -2,6 +2,10 @@ __pycache__/
 .venv/
 build/
 dist/
+node_modules/
+package-lock.json
+# the example ships its build, so the widget runs without a bundler installed
+!examples/bundled_ui/dist/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
