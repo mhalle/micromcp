@@ -361,10 +361,40 @@ check("a BOM in a page file is dropped",
       Widget("bom", html=bundle_dir / "bom.html").html.startswith("<!doctype"), True)
 check("html= given a file name as a str is refused",
       raises(lambda: Widget("strpath", html="ui/dist/index.html")), "ValueError")
-for esc in (False, True):
-    check(f"'<!--' then '<script' inside a script is refused (escape_scripts={esc})",
-          raises(lambda e=esc: Widget("dbl", body="<p>x</p>", modules=['window.a = "<!--<script>";'],
-                                      escape_scripts=e)), "ValueError")
+# a script's end state decides: a closed <!-- <script> --> region is harmless
+check("a script ending inside '<!--' + '<script' is refused",
+      raises(lambda: Widget("dbl", body="<p>x</p>", modules=['window.a = "<!--<script>";'])),
+      "ValueError")
+check("a closed '<!-- <script> -->' region is accepted",
+      raises(lambda: Widget("dbl2", body="<p>x</p>",
+                            modules=['var a = "<!-- <script> -->", b = "<script> and <style>";'])),
+      None)
+esc = Widget("dbl3", body="<p>x</p>", modules=['window.a = "<!--<script>";'],
+             escape_scripts=True).html
+check("escape_scripts closes the sequence instead of refusing",
+      (esc.endswith("\n//--></script></body></html>"), '"<!--<script>"' in esc), (True, True))
+
+# a module's own imports have to resolve: a widget has no origin and no bundler
+ESM = "https://esm.sh/three"
+for label, kw, want in [
+        ("a bare specifier in a module",
+         {"modules": ['import {clone} from "lodash-es";\nclone({});']}, "ValueError"),
+        ("a relative import in a module", {"modules": ['import "./chunk.js";']}, "ValueError"),
+        ("a re-export from a relative path", {"modules": ['export {x} from "./y.js";']},
+         "ValueError"),
+        ("a root-absolute import", {"modules": ['import "/assets/c.js";']}, "ValueError"),
+        ("an import written inside a string", {"scripts": ['var s = \'import "y"\';']}, None),
+        ("a mapped specifier", {"modules": ['import "three";'], "imports": {"three": ESM}}, None),
+        ("a specifier under a mapped prefix",
+         {"modules": ['import "three/addons/x.js";'], "imports": {"three/": ESM}}, None),
+        ("an https import", {"modules": ['import "https://esm.sh/x";']}, None),
+        ("an import mentioned mid-statement",
+         {"modules": ['var doc = "run import \'./x.js\' first";']}, None)]:
+    check(f"module imports: {label}", raises(lambda k=kw: Widget("mod", body="<p>x</p>", **k)), want)
+heard.clear()
+Widget("dyn", body="<p>x</p>", modules=['if (window.x) import("./late.js");'])
+check("a dynamic import in a module is warned about, not refused",
+      any("./late.js" in m for m in heard if "'dyn'" in m), True)
 heard.clear()
 Widget("vite8", body="<p>x</p>",
        modules=["import(`./a.js`); new Worker(new URL(`/assets/w-B0.js`,``+import.meta.url));"
@@ -402,6 +432,174 @@ Widget("two", html='<html><head></head><body><script type="module">'
                    'const M = "ui/notifications/initialized";</script></body></html>', bridge=True)
 check("another MCP Apps client beside bridge=True is warned about",
       any("'two'" in m and "two handshakes" in m for m in heard), True)
+# what a build folder holds: a bundler's output warns, hand-kept files do not
+dist = pathlib.Path(tempfile.mkdtemp())
+(dist / "widget.js").write_text("window.w = 1")
+(dist / "assets").mkdir()
+(dist / "assets" / "vendor-chunk.js").write_text("x")       # a split chunk, plain name
+(dist / "main.9f8e7d6c.js").write_text("x")                 # a hashed chunk
+(dist / "favicon.ico").write_bytes(b"\0")                   # an icon breaks nothing
+(dist / "notes.html").write_text("<p>x</p>")                # a sibling page
+heard.clear()
+Widget("dist", body="<p>x</p>", modules=[dist / "widget.js"])
+said = " ".join(m for m in heard if "'dist'" in m)
+check("a build folder's leftovers warn, its icon and sibling page do not",
+      ("assets/vendor-chunk.js" in said, "main.9f8e7d6c.js" in said,
+       "favicon" in said, "notes.html" in said), (True, True, False, False))
+vendored = pathlib.Path(tempfile.mkdtemp())
+for n in ("purify.min.js", "purify.cjs.js", "three.module.js", "logo.png"):
+    (vendored / n).write_text("x")
+heard.clear()
+Widget("vendored", body="<p>x</p>", modules=[vendored / "purify.min.js"])
+check("a folder of hand-kept libraries is quiet", [m for m in heard if "'vendored'" in m], [])
+pkg = pathlib.Path(tempfile.mkdtemp())
+(pkg / "myapp").mkdir()
+(pkg / "myapp" / "__init__.py").write_text("")
+(pkg / "myapp" / "static").mkdir()
+(pkg / "myapp" / "static" / "widget.html").write_text("<p>x</p>")
+(pkg / "myapp" / "static" / "logo.png").write_bytes(b"\0")
+heard.clear()
+Widget("pkgstatic", body=pkg / "myapp" / "static" / "widget.html")
+check("a Python package's static folder is quiet", [m for m in heard if "'pkgstatic'" in m], [])
+
+# the second-client warning reads scripts, not prose
+heard.clear()
+Widget("prose", body="<p>The client sends <code>ui/notifications/initialized</code>.</p>")
+Widget("logview", body='<pre>{"method":"ui/notifications/initialized"}</pre>')
+check("a page that only mentions the method name is quiet",
+      [m for m in heard if "'prose'" in m or "'logview'" in m], [])
+heard.clear()
+Widget("client", html='<html><head></head><body><script>'
+                      'const M = "ui/notifications/initialized";</script></body></html>',
+       bridge=True)
+check("a real second client in a script still warns",
+      any("two handshakes" in m for m in heard if "'client'" in m), True)
+
+# CSS and JS heuristics
+check("@import with a layer() prelude is refused",
+      raises(lambda: Widget("layer", body="<p>x</p>", styles=['@import layer(base) "theme.css";'])),
+      "ValueError")
+heard.clear()
+Widget("jsdoc", body="<p>x</p>", scripts=["// see `line.from`/`line.to` for the range\nvar a = 1;"])
+check("a JSDoc backtick path is not reported as a load", [m for m in heard if "'jsdoc'" in m], [])
+
+# an unreadable file says which argument, and is never blocked on
+def message(fn):
+    try:
+        fn()
+    except Exception as e:  # noqa: BLE001 - the message is what is under test
+        return str(e)
+    return ""
+
+bad = pathlib.Path(tempfile.mkdtemp())
+(bad / "latin.html").write_bytes(b"<p>caf\xe9</p>")
+(bad / "sub").mkdir()
+unreadable = [("a missing file", bad / "nope.html"), ("a directory", bad / "sub"),
+              ("a non-UTF-8 file", bad / "latin.html")]
+if hasattr(os, "mkfifo"):
+    os.mkfifo(bad / "pipe.html")
+    unreadable.append(("a pipe", bad / "pipe.html"))
+for label, path in unreadable:
+    check(f"html= refused: {label}", raises(lambda p=path: Widget("badfile", html=p)), "ValueError")
+check("the read error names the argument",
+      "html" in message(lambda: Widget("badfile", html=bad / "nope.html")), True)
+check("a page name with a query is refused",
+      raises(lambda: Widget("q", html="dist/index.html?v=2")), "ValueError")
+check("a page given as a URL says to fetch it",
+      "fetch" in message(lambda: Widget("u", html="https://example.com/report.html")), True)
+
+
+class Rendered:                        # renders itself, as markupsafe.Markup does
+    def __init__(self, s): self.s = s
+    def __html__(self): return self.s
+
+
+check("an __html__ object that looks like a file name is still markup",
+      raises(lambda: Widget("markup", body=Rendered("index.html"))), None)
+
+# what a browser parses, parsed the same way (round 2: a browser was the oracle)
+for label, kw in [
+        ("a load after a nested noscript",
+         {"html": '<noscript><noscript></noscript><img src="probe.png"></noscript>'}),
+        ("a prefetched chunk",
+         {"body": "<p>x</p>", "head": '<link rel=prefetch href="chunk.js">'}),
+        ("a stylesheet hidden behind <style/>",
+         {"html": '<style/>div{background:url(probe.png)}</style>'}),
+        ("a style left unclosed at the end", {"html": '<body><style>@import "late.css";'}),
+        ("an <image srcset>", {"body": '<image srcset="logo.png 1x">'}),
+        ("a frame", {"html": '<frameset><frame src="panel.html"></frameset>'}),
+        ("a scheme-relative http: URL", {"body": '<img src="http:probe.png">'}),
+        ("a page whose script swallows the rest",
+         {"html": '<!doctype html><html><head></head><body><script>'
+                  'var a="<!--";var b="<script>";</script><div id=late></div></body></html>'})]:
+    check(f"refused: {label}", raises(lambda k=kw: Widget("browser", **k)), "ValueError")
+check("text inside <textarea/> is not markup",
+      raises(lambda: Widget("rcdata", html='<textarea/><img src="probe.png"></textarea>')), None)
+
+# the bridge goes ahead of anything the page runs, and carries the charset
+doc = Widget("early", html='<!doctype html><script>window.app=1</script><head></head><body>x',
+             bridge=True).html
+check("the bridge precedes a script that comes before the head",
+      doc.index(BRIDGE_JS) < doc.index("window.app"), True)
+doc = Widget("ns", html='<!doctype html><html><body><noscript><head></noscript>'
+                        '<script>window.app=1</script></body></html>', bridge=True).html
+check("a <head> inside <noscript> is not the head",
+      doc.index(BRIDGE_JS) < doc.index("<noscript>"), True)
+doc = Widget("charset", html='<!doctype html><html><head><meta charset="UTF-8"><title>t</title>'
+                             '</head><body>caf\u00e9</body></html>', bridge=True).html
+check("a bridged page still declares its charset in the first 1024 bytes",
+      0 < doc.find("charset") < 1024, True)
+
+# imports=, csp=, and the other arguments
+w = Widget("gen", body="<p>x</p>",
+           csp={"connectDomains": (o for o in ["https://a.example.com"])})
+check("a csp list given as a generator survives",
+      w.meta["ui"]["csp"]["connectDomains"], ["https://a.example.com"])
+check("csp that is not a dict is refused",
+      raises(lambda: Widget("c", body="<p>x</p>", csp=["https://a.example.com"]), TypeError),
+      "TypeError")
+check("an import map key that is not a specifier says so",
+      "keys" in message(lambda: page("<p>x</p>", imports={1: "https://cdn.example.com/a.js"})),
+      True)
+built = page("<p>x</p>", head='<script type="importmap">{"imports":{}}</script>',
+             imports={"three": "https://esm.sh/three"})
+check("the generated import map comes before head=",
+      built.index("esm.sh/three") < built.index('{"imports":{}}'), True)
+check("page() refuses a relative URL as Widget does",
+      raises(lambda: page('<img src="/logo.png">')), "ValueError")
+check("a route must be a whole tool name",
+      raises(lambda: Widget("r", body="<p>x</p>", route="ok\n", bridge=False)), "ValueError")
+check("a uri with a space is refused",
+      raises(lambda: Widget("u2", body="<p>x</p>", uri="ui://a b")), "ValueError")
+check("border must be a flag",
+      raises(lambda: Widget("b", body="<p>x</p>", border="no"), TypeError), "TypeError")
+check("bytes are not an asset list",
+      raises(lambda: Widget("by", body="<p>x</p>", scripts=b"var a=1"), TypeError), "TypeError")
+check("a fragment's content type must be a header value",
+      raises(lambda: fragment("<p>x</p>", content_type="text/html\r\nX: 1")), "ValueError")
+bom = pathlib.Path(tempfile.mkdtemp()) / "w.css"
+bom.write_bytes(b"\xef\xbb\xbfbody{margin:0}")
+check("a BOM in a stylesheet file is dropped",
+      "\ufeff" in Widget("bom2", body="<p>x</p>", styles=[bom]).html, False)
+deep = "<div>x</div>"
+for _ in range(400):
+    deep = '<iframe srcdoc="' + deep.replace("&", "&amp;").replace('"', "&quot;") + '"></iframe>'
+heard.clear()
+Widget("deep", body=deep)
+check("deeply nested srcdoc does not give up on the page",
+      [m for m in heard if "could not be checked" in m], [])
+check("a template-literal import is not taken for a real one",
+      raises(lambda: Widget("tmpl", body="<p>x</p>", modules=[
+          "const code = `\nimport { x as _x } from 'vue'\n`; window.c = code;"])), None)
+
+# inputs crafted to make a regex backtrack
+t1 = time.monotonic()
+for bad_css in ["/*a" * 60000, "image-set(" * 12000]:
+    raises(lambda c=bad_css: Widget("slowcss", body="<p>x</p>", styles=[c]))
+raises(lambda: Widget("slowset", body='<img srcset="' + "a 1x, " * 80000 + '">'))
+check("unclosed comments, image-set and a long srcset stay fast", time.monotonic() - t1 < 3.0,
+      True)
+
 t0 = time.monotonic()
 raises(lambda: Widget("slow1", body="<p>x</p>", styles=["url(" * 20000]))
 raises(lambda: Widget("slow2", body="<p>x</p>", modules=["import" + " " * 40000]))
