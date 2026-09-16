@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### MCP Apps
+- A specifier the page's own import map resolves is no longer reported as a
+  path a widget cannot load. A bundle that leaves `three` and `three/addons/`
+  external, with `imports=` mapping both, drew a warning about
+  `three/addons/controls/OrbitControls.js` although the map covers it.
+
 ## 0.2.0 — 2026-09-16 (tagged; not yet on PyPI)
 
 MCP Apps widgets, an OAuth token-validation helper, and the core fixes that
