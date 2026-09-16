@@ -100,14 +100,14 @@ def card_el(card: dict, index: int):
         Div(
             Button("←", cls="ghost", title="Move left", disabled=(i == 0) or None,
                    hx_post=tool_url("card_move", id=card["id"], delta="-1"),
-                   hx_target="#app", hx_swap="innerHTML"),
+                   hx_include="#conn", hx_target="#app", hx_swap="innerHTML"),
             Button("→", cls="ghost", title="Move right",
                    disabled=(i == len(COLUMN_IDS) - 1) or None,
                    hx_post=tool_url("card_move", id=card["id"], delta="1"),
-                   hx_target="#app", hx_swap="innerHTML"),
+                   hx_include="#conn", hx_target="#app", hx_swap="innerHTML"),
             Button("✕", cls="ghost danger", title="Delete",
                    hx_post=tool_url("card_delete", id=card["id"]),
-                   hx_target="#app", hx_swap="innerHTML"),
+                   hx_include="#conn", hx_target="#app", hx_swap="innerHTML"),
             cls="card-actions"),
         cls="card", data_card=card["id"], style=f"--i:{index}")
 
@@ -126,7 +126,7 @@ def column_el(column: str, label: str):
                   aria_label=f"Add a card to {label}"),
             Button("+", cls="add", title=f"Add to {label}",
                    hx_post=tool_url("card_add", column=column),
-                   hx_include=f"#add-{column}", hx_target="#app", hx_swap="innerHTML"),
+                   hx_include=f"#add-{column}, #conn", hx_target="#app", hx_swap="innerHTML"),
             cls="add-form"),
         cls="column", data_column=column)
 
@@ -242,6 +242,7 @@ document.addEventListener("htmx:after:swap", () => {
 (async () => {
   await mcp.ready;                       // the handshake first, then the channel
   const ws = mcp.channel("board");
+  ws.onopen = () => { document.getElementById("conn").value = ws.id; };   // skip our own pushes
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
     // htmx.swap() rather than innerHTML: it processes the hx-* attributes in
@@ -256,6 +257,7 @@ widget = Widget(
     "kanban",
     title="Kanban board",
     body=('<h1>Kanban <span class="hint">every click is a tool call</span></h1>'
+          '<input type="hidden" id="conn" name="conn">'      # this page's channel connection
           '<div id="app" hx-post="tool:board_view" hx-trigger="mcp:ready" '
           'hx-target="#app" hx-swap="innerHTML">Loading…</div>'),
     styles=[STYLE],
@@ -270,9 +272,11 @@ def joined(conn):
     conn.send_json({"html": board_html(), "context": model_context("channel")})
 
 
-def push() -> None:
-    """Tell every open widget what the board looks like now."""
-    sync.broadcast_json({"html": board_html(), "context": model_context("channel")})
+def push(exclude: str = "") -> None:
+    """Tell every open widget what the board looks like now, except the one whose own
+    action caused it: that page is already swapping the fragment it asked for."""
+    sync.broadcast_json({"html": board_html(), "context": model_context("channel")},
+                        exclude=exclude or None)
 
 
 # ------------------------------------------------------- tools the widget calls
@@ -284,26 +288,26 @@ def board_view():
 
 
 @mcp.tool(visibility="app")
-def card_add(column: str = "todo", text: str = ""):
+def card_add(column: str = "todo", text: str = "", conn: str = ""):
     """Add a card the user typed."""
     board.add(column, text)
-    push()
+    push(conn)
     return fragment(render_board(), context=model_context("tool"))
 
 
 @mcp.tool(visibility="app")
-def card_move(id: str = "", delta: str = "1"):
+def card_move(id: str = "", delta: str = "1", conn: str = ""):
     """Move a card one column left or right."""
     board.step(id, int(delta))
-    push()
+    push(conn)
     return fragment(render_board(), context=model_context("tool"))
 
 
 @mcp.tool(visibility="app")
-def card_delete(id: str = ""):
+def card_delete(id: str = "", conn: str = ""):
     """Delete a card."""
     board.remove(id)
-    push()
+    push(conn)
     return fragment(render_board(), context=model_context("tool"))
 
 

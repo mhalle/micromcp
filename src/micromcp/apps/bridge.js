@@ -214,6 +214,9 @@
       this.readyState = MCPWebSocket.CONNECTING;
       this.onopen = this.onmessage = this.onerror = this.onclose = null;
       this._conn = null; this._wait = 20; this._chain = Promise.resolve();
+      // The server's id for this connection, once open: pass it to a tool and the
+      // tool can broadcast to everyone else (`broadcast_json(..., exclude=id)`).
+      Object.defineProperty(this, "id", {get: () => this._conn, enumerable: true});
       sockets.add(this);
       this._open();
     }

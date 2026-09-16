@@ -416,7 +416,8 @@ with the query, form, or JSON body as arguments. It is wired into htmx 4
 a hook (Datastar). With htmx, call
 tools with `hx-post`: htmx rewrites a GET URL to its path, dropping `tool:`.
 Any other URL goes to the widget's `route=` tool, which the page carries as
-`<meta name="mcp-route">`; a browser error naming that meta tag means the
+`<meta name="mcp-route">`. micromcp warns when the host reads a widget whose
+`route=` names no tool on that server, which is the first moment it can tell; a browser error naming that meta tag means the
 widget has no `route=`, or that an `hx-get` dropped the `tool:` scheme where
 `hx-post` would have kept it. This is how existing Django views serve a
 widget:
@@ -555,9 +556,20 @@ Pushing HTML into a hypermedia widget takes one more step than assigning
 `innerHTML`, which would leave the new markup unwired: hand it to the toolkit
 instead, `htmx.swap({text: msg.html, target: "#board", swap: "innerMorph"})`,
 so the `hx-*` attributes in it are picked up. If the action that broadcast
-also returned a fragment, the widget swaps twice; either let the broadcast do
-the work and answer the tool with an empty fragment, or tag the payload with
-the sender so a page can skip its own.
+also returned a fragment, that widget would swap twice, so leave it out:
+`broadcast_json(payload, exclude=conn)` skips one connection, and a page knows
+its own as `mcp.channel("board").id`. Send the id with the call — a hidden
+field and `hx-include`, or an argument — and the tool has it to hand:
+
+```python
+@mcp.tool(visibility="app")
+def card_add(column: str = "todo", text: str = "", conn: str = ""):
+    board.add(column, text)
+    sync.broadcast_json({"html": board_html()}, exclude=conn)   # everyone else
+    return fragment(render_board())                             # and this page
+```
+
+`examples/mcp_app_board.py` does exactly this.
 
 Two practical notes. A context update is debounced, and that includes one a
 tool sent with `fragment(context=...)`, so two updates in the same instant

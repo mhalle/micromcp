@@ -110,6 +110,15 @@
   inlined as `data:` URLs are blocked by the default policy's `font-src`, so
   a vendored stylesheet belongs on its CDN, and Leaflet needs
   `L.Icon.Default.imagePath = ""` before its icons are pointed at data URLs.
+- `Channel.broadcast(text, exclude=)` and `broadcast_json(value, exclude=)`
+  leave one connection out, and a widget knows its own as
+  `mcp.channel(name).id`. Without it, an action that both answered with a
+  fragment and broadcast made the acting widget swap twice; the kanban example
+  now swaps once and the other open boards still update.
+- A widget whose `route=` names no tool on the server it is registered with is
+  warned about when the host reads the widget — the first moment it can be
+  known, since tools may be registered after the widget is built. It used to
+  surface only as an `mcp-route` error in the frame.
 - Four new examples, each a shape the docs describe and none of which existed:
   `mcp_app_bundled.py` (a Vite build plugged in), `mcp_app_charts.py` (a charting
   library from a CDN, an app-only tool for data, live events over a channel),
