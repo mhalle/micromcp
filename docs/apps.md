@@ -675,6 +675,12 @@ context counter).
 - `examples/mcp_app_bundled.py`: a Vite build (`examples/bundled_ui/`) plugged in as
   one module and one stylesheet, with its image inlined — the recipe below, complete
   and runnable
+- `examples/mcp_app_charts.py`: a dashboard drawn by ECharts from a CDN, whose data
+  comes from an app-only tool and whose live events arrive on a channel
+- `examples/mcp_app_map.py`: a shared Leaflet map, with the tile origin declared by
+  hand and the model dropping markers into an open widget
+- `examples/mcp_app_board.py`: a kanban board with no bundler and no app logic —
+  every click a tool call answered with `fragment()`, two open boards kept in step
 - `examples/mcp_app_hypermedia.py`: the todo widget rendered with FastHTML
   components by app-only tools, and by Django views, plus the toolkit lab and
   the dev host

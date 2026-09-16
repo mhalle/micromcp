@@ -110,6 +110,13 @@
   inlined as `data:` URLs are blocked by the default policy's `font-src`, so
   a vendored stylesheet belongs on its CDN, and Leaflet needs
   `L.Icon.Default.imagePath = ""` before its icons are pointed at data URLs.
+- Four new examples, each a shape the docs describe and none of which existed:
+  `mcp_app_bundled.py` (a Vite build plugged in), `mcp_app_charts.py` (a charting
+  library from a CDN, an app-only tool for data, live events over a channel),
+  `mcp_app_map.py` (Leaflet, a tile origin declared by hand, the model dropping
+  markers into an open map), and `mcp_app_board.py` (no bundler at all: every
+  click a tool call answered with `fragment()`, two boards kept in step). A test
+  imports every example and fails if one stops building or starts warning.
 - `examples/mcp_app_bundled.py`: the bundling recipe as a runnable file. Its
   `examples/bundled_ui/` is an ordinary Vite project whose build writes the two
   files the widget takes, with the logo inlined as a `data:` URL in both the
