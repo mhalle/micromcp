@@ -383,7 +383,8 @@ _MODULE_IMPORT_RE = re.compile(r"""(?:^|[;}])\s*(?:import|export)\b"""
 _JS_META_URL_RE = re.compile(r"""\bnew\s+URL\(\s*"""
                              r"""(["'`])([^"'`$]+)\1\s*,\s*(?:(?:``|""|'')\s*\+\s*)?"""
                              r"""(?:self\.location|import\.meta\.url)""")
-_JS_ASSET_RE = re.compile(r"""(["'`])((?:\.{1,2}/|/)?[\w.@%+-]+(?:/[\w.@%+-]+)*"""
+# A path, not a word: it has a slash in it somewhere ("Node.js" is a word).
+_JS_ASSET_RE = re.compile(r"""(["'`])((?=[^"'`\s]*/)[\w./@%+~-]+"""
                           r"""\.(?:png|jpe?g|gif|svg|webp|avif|ico|bmp|woff2?|ttf|otf|eot|"""
                           r"""css|m?js|json|wasm|mp3|mp4|webm|ogg|wav))\1(?!\s*[:(])""", re.I)
 
@@ -661,8 +662,8 @@ def _hashed(name) -> bool:
 
 
 def _some(names) -> str:
-    """A few of them, for a log line."""
-    return ", ".join(sorted(names)[:5]) + (" ..." if len(names) > 5 else "")
+    """A few of them, quoted, for a log line."""
+    return ", ".join(repr(n) for n in sorted(names)[:5]) + (" ..." if len(names) > 5 else "")
 
 
 def _leftovers(what, checked, passed):

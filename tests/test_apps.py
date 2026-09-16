@@ -448,6 +448,14 @@ for label, doc in [
     check(f"no-client warning stays quiet for {label}",
           [m for m in heard if "'client2'" in m], [])
 heard.clear()
+Widget("wordly", body="<p>x</p>",
+       scripts=['var n = navigator.userAgent.indexOf("Node.js") > -1, t = "image/png";'])
+check("a word that ends in .js is not a path", [m for m in heard if "'wordly'" in m], [])
+heard.clear()
+Widget("quoted", body="<p>x</p>", scripts=['var a = "./one.js", b = "two/three.png";'])
+check("the paths in a warning are quoted",
+      any("'./one.js', 'two/three.png'" in m for m in heard if "'quoted'" in m), True)
+heard.clear()
 Widget("barepath", body="<p>x</p>", scripts=['var p = "img/logo.png";'])
 check("an asset path without ./ is warned about too",
       any("img/logo.png" in m for m in heard if "'barepath'" in m), True)
@@ -701,6 +709,8 @@ check("page inlines the bridge before the page's scripts",
 check("page escapes the title", "<title>A &amp; B</title>" in doc, True)
 check("page refuses a script that would close its tag",
       raises(lambda: page("", scripts=["x</SCRIPT >"])), "ValueError")
+check("a tool result's context reaches the model on both call paths",
+      BRIDGE_JS.count("pushContext(") >= 3, True)
 node = shutil.which("node")
 if node:
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as tmp:

@@ -25,8 +25,15 @@
     hostCapabilities: null, hostInfo: null, hostContext: null, request, notify, status,
     ready: new Promise((res, rej) => { resolveReady = res; rejectReady = rej; }),
     on(method, fn) { (handlers[method] ||= []).push(fn); },
-    callTool(name, args) { return mcp.ready.then(() => request("tools/call", {name, arguments: args || {}})); },
+    callTool(name, args) {
+      return mcp.ready.then(() => request("tools/call", {name, arguments: args || {}}))
+        .then(res => { pushContext(res); return res; });
+    },
   };
+  function pushContext(res) {                                 // fragment(..., context=...)
+    const pushed = ((res && res._meta) || {})["micromcp/context"];
+    if (pushed && typeof pushed === "object") mcp.setContext(pushed.text, pushed.data);
+  }
   function applyHostContext(ctx) {
     if (!ctx) return;
     const root = document.documentElement;
@@ -123,8 +130,7 @@
       if (json) args.content_type = "application/json";
       res = await mcp.callTool(route.content, args);
     }
-    const pushed = (res._meta || {})["micromcp/context"];     // fragment(..., context=...)
-    if (pushed && typeof pushed === "object") mcp.setContext(pushed.text, pushed.data);
+    pushContext(res);
     const text = (res.content || []).filter(b => b.type === "text").map(b => b.text).join("");
     const http = (res._meta || {})["micromcp/http"] || {};
     let code = Number(http.status) || (res.isError ? 500 : 200);

@@ -76,6 +76,8 @@ export interface MCPBridge {
   hostInfo: InitializeResult["hostInfo"] | null;
   hostContext: HostContext | null;
   /** Call a tool on this widget's server (after `ready`). */
+  /** Rejects if the call itself fails (no such tool, bad arguments, timeout); a tool
+   *  that ran and failed resolves with `isError: true`. */
   callTool(name: string, args?: Record<string, unknown>): Promise<ToolResult>;
   /** fetch()-shaped: `tool:name?a=1` calls that tool; other URLs go to the `route=` tool. */
   fetch(input: string | URL | Request, init?: RequestInit): Promise<Response>;
