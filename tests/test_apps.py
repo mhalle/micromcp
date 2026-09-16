@@ -734,6 +734,23 @@ for path in sorted(EXAMPLES.glob("*.py")):
           [] if isinstance(outcome, list) else outcome)
 sys.path.pop(0)
 
+check("the page can read its channel connection id",
+      ('Object.defineProperty(this, "id"' in BRIDGE_JS, "readonly id: string | null" in BRIDGE_TYPES),
+      (True, True))
+route_mcp = MCP("routed", "1.0.0")
+Widget("routed", body="<p>x</p>", route="django_http").register(route_mcp)
+page = next(v for v in route_mcp.resources["ui://routed"].values() if callable(v))
+heard.clear()
+page()
+check("a route= that names no tool is warned about when the host reads the widget",
+      any("not a tool on this server" in m for m in heard), True)
+have_route = MCP("routed2", "1.0.0")
+have_route.tool(lambda: "x", name="django_http")
+Widget("routed2", body="<p>x</p>", route="django_http").register(have_route)
+heard.clear()
+next(v for v in have_route.resources["ui://routed2"].values() if callable(v))()
+check("... and a route= that names a real tool is not", heard, [])
+
 check("a tool result's context reaches the model on both call paths",
       BRIDGE_JS.count("pushContext(") >= 3, True)
 node = shutil.which("node")
@@ -1048,6 +1065,12 @@ t0 = time.monotonic()
 r = ctool("channel_recv", {"conn": o["conn"], "wait": 0.5})
 check("an idle recv waits out its wait and returns empty",
       (r["frames"], r["closed"], 0.4 < time.monotonic() - t0 < 2), ([], False, True))
+second = ctool("channel_open", {"channel": "room", "params": "who=bo"})
+room.broadcast_json({"n": 2}, exclude=o["conn"])       # the widget that caused it already knows
+check("a broadcast can skip the connection that caused it",
+      (ctool("channel_recv", {"conn": o["conn"], "wait": 0})["frames"],
+       ctool("channel_recv", {"conn": second["conn"], "wait": 0})["frames"]), ([], ['{"n":2}']))
+ctool("channel_close", {"conn": second["conn"]})
 a = ctool("channel_open", {"channel": "room"}, auth="Bearer t")
 check("another principal cannot use a connection",
       ctool("channel_recv", {"conn": a["conn"], "wait": 0})["closed"], True)

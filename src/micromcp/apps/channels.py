@@ -217,13 +217,19 @@ class Channel:
         with self._lock:
             return [c for c in self._conns.values() if not c.closed]
 
-    def broadcast(self, text: str) -> None:
-        """Queue a text frame for every open connection."""
+    def broadcast(self, text: str, *, exclude=None) -> None:
+        """Queue a text frame for every open connection. `exclude` leaves one
+        out, by `Connection` or by id: the widget whose own action caused the
+        broadcast has usually rendered the change already, and its page knows
+        its id as `mcp.channel(...).id`."""
+        skip = getattr(exclude, "id", exclude)
         for conn in self.connections:
-            conn.send(text)
+            if conn.id != skip:
+                conn.send(text)
 
-    def broadcast_json(self, value) -> None:
-        self.broadcast(json.dumps(value, allow_nan=False, separators=(",", ":")))
+    def broadcast_json(self, value, *, exclude=None) -> None:
+        self.broadcast(json.dumps(value, allow_nan=False, separators=(",", ":")),
+                       exclude=exclude)
 
     def _admits(self, principal) -> bool:
         try:

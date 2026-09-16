@@ -41,6 +41,9 @@ export type Outcome = "ok" | `error: ${string}`;
 
 /** A WebSocket-compatible socket over a server Channel. Frames are text. */
 export interface MCPWebSocket extends EventTarget {
+  /** The server's id for this connection once open, else null: hand it to a tool so its
+   *  `broadcast_json(..., exclude=...)` can skip the widget that caused the change. */
+  readonly id: string | null;
   readonly url: string;
   readonly channel: string;
   readonly protocol: string;

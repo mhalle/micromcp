@@ -806,7 +806,7 @@ class Widget:
                  bridge: bool = False, escape_scripts: bool = False):
         if not isinstance(name, str) or not _WIDGET_NAME_RE.fullmatch(name):
             raise ValueError(f"widget name {name!r}: letters, digits, '.', '_' and '-' only")
-        self.name, self.title = name, title or name
+        self.name, self.title, self.route = name, title or name, route
         self.uri = f"ui://{name}" if uri is None else uri
         if not isinstance(self.uri, str) or not self.uri.startswith("ui://") \
                 or "{" in self.uri or len(self.uri) <= len("ui://") \
@@ -909,9 +909,17 @@ class Widget:
         its URI. `tool()` does this for you."""
         if self._check(mcp):
             return self.uri
-        doc = self.html
+        doc, route, checked = self.html, self.route, []
 
         def widget() -> str:
+            # The host is fetching the page, so every tool is registered by now: this is the
+            # first moment a route= can be checked against the server it routes to.
+            if route and not checked:
+                checked.append(True)
+                if route not in getattr(mcp, "tools", {}):
+                    log.warning("widget %r sends its non-tool: URLs to %r, which is not a tool "
+                                "on this server; those requests fail in the frame with a "
+                                "mcp-route error", self.name, route)
             return doc
         widget.__name__ = re.sub(r"\W", "_", self.name) + "_widget"
         widget.__doc__ = f"MCP Apps widget {self.title!r}."
