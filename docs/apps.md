@@ -163,23 +163,41 @@ never both.
 
 **What micromcp checks when the widget is built.** A page that loads a
 relative URL is refused, with the URL and where it appears: `src`, `href`,
-`srcset`, and `background` on elements that load (scripts, stylesheets and
-preloads, images, media, frames, including `srcdoc`), `url()`, `image-set()`,
+`srcset`, and `background` on elements that load (scripts, stylesheets,
+preloads and prefetches, images, media, frames, including `srcdoc` and
+`<template>` content, which loads when it is cloned), `url()`, `image-set()`,
 and `@import` in styles, and import maps. Links, hypermedia attributes,
 `<link rel="icon">`, and `<noscript>` content are not loads, and loads after a
-valid https `<base href>` resolve against it. Inside inline scripts, relative
-imports, `new URL(..., import.meta.url)`, and asset paths (a `public/` file
-used from a script, say) are logged as warnings, since they may be mere
-strings; so are files left next to an `html=`, `body=`, or `modules=` path.
-A working build folder holds only what you pass, so anything else there, a
-split chunk, a worker, a copied `public/` file, is something the widget will
-fail to load. A page carrying another MCP Apps client as well as micromcp's
-bridge is warned about too: that is two handshakes with the host. An inlined
-script containing `</script` is refused; `escape_scripts=True` rewrites it as
-`<\/script`, as bundlers do (the raw text of a `String.raw` template then
-keeps the backslash). `<!--` followed by `<script` inside a script is refused
-either way. Files are read when the `Widget` is built, so restart the server
-after a rebuild, and remember that hosts cache a widget per connector.
+valid https `<base href>` resolve against it. `page()` is checked the same
+way; `fragment()` is not, so a fragment's URLs are yours to keep absolute.
+
+A module has a second way to fail: its own `import`s. A widget runs modules
+with no origin and no bundler, so a static `import` of a relative path or of a
+bare specifier (`import {clone} from "lodash-es"`) resolves to nothing and the
+module never runs at all. Those are refused, naming the specifier; give the
+module its dependency by bundling it in, or map it to an https URL with
+`imports=`. A dynamic `import()` is only warned about, since it may never run.
+
+Warnings, not refusals, cover what cannot be known for certain: relative
+imports and asset paths inside a classic script (they may be mere strings), a
+bundler's leftover output beside an `html=`, `body=`, or `modules=` path (a
+content-hashed file, or anything in an `assets/` folder, that you did not pass
+— a split chunk, a worker, a copied `public/` file), and a page that carries
+another MCP Apps client as well as micromcp's bridge, which would be two
+handshakes with the host.
+
+An inlined script containing `</script` is refused; `escape_scripts=True`
+rewrites it as `<\/script`, as bundlers do (the raw text of a `String.raw`
+template then keeps the backslash). A script that *ends* inside a `<!--` ...
+`<script` sequence is refused too: a browser would swallow the rest of the
+page as script, so nothing runs. `escape_scripts=True` closes the sequence
+with a `//-->` line, which is what makes Vue 3's development build usable; a
+closed `<!-- <script> -->` inside a script is harmless and accepted. A
+complete `html=` page carrying such a script is refused rather than shipped
+inert, since there is nothing to rewrite in a page you did not build here.
+
+Files are read when the `Widget` is built, so restart the server after a
+rebuild, and remember that hosts cache a widget per connector.
 
 **Workers, WASM, and URLs built at run time.** `codeSplitting: false` does
 not inline a worker created as `new Worker(new URL("./w.js",
@@ -195,6 +213,14 @@ checked: Leaflet's default marker icons, for one, go missing unless pointed
 at imported images (`L.Icon.Default.mergeOptions({iconUrl, iconRetinaUrl,
 shadowUrl})` is the usual fix).
 
+**Vendored CSS that loads fonts.** katex, leaflet, and the like ship a
+stylesheet whose `url()`s point at a `fonts/` or `images/` folder beside it.
+Passing that file to `styles=` is refused, correctly: those files are not
+inlined and the widget has no origin to fetch them from. Either run the
+stylesheet through a bundler (Vite inlines the fonts if `assetsInlineLimit` is
+high enough), or load the CSS from its CDN as an https URL, which also serves
+its fonts.
+
 **Bun (checked with 1.4.0).** For one complete page, `bun build --compile
 --target=browser --production index.html --outdir dist` writes a
 self-contained `dist/index.html`, images imported from scripts included; pass
@@ -204,7 +230,9 @@ does not inline everything: images imported from scripts become separate
 files, or empty strings with the `dataurl` loader, and images in CSS are
 inlined only with the default loader. Pass `--production` either way, or
 React ships its development build, and give a Bun-built React module
-`escape_scripts=True`: react-dom's `"<script></script>"` is left raw. Other
+`escape_scripts=True`: react-dom's `"<script></script>"` is left raw. Vue 3's
+development build needs `escape_scripts=True` for the same reason, whichever
+bundler produced it. Other
 bundlers need the same three things: one output file, assets as data URLs,
 and names without hashes.
 
