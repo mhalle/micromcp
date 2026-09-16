@@ -327,6 +327,7 @@ size of a context update, and a `ui://` already taken.
 | a relative or root-absolute path (`./x.png`, `/x.png`) inside a classic script | warned | it may be a mere string; if a bundler wrote it, raise the inline limit |
 | a script that fetches a chunk at run time — `import("./x.js")` — | warned | harmless if it never runs; otherwise bundle the chunk in, or map it with `imports=` |
 | an asset file next to what you passed that carries a content hash, sits in an `assets/`-style folder, or is named like a worker | warned | you left part of the build behind: pass it, or inline it |
+| a page of a few hundred KB | warned | a host fetches and caches a widget per connector, and the page rides inside a tool result: load big libraries from an https URL, or check what the bundler pulled in |
 | a font inlined as a `data:` URL | warned | a host's `font-src` refuses it; serve the font from a declared https origin |
 | no MCP Apps client micromcp recognises in an `html=` page | warned | pass `bridge=True`; if the page bundles a client micromcp cannot see, ignore it |
 | micromcp's own bridge already in the page, plus `bridge=True` | refused | leave `bridge=True` off |
@@ -343,6 +344,13 @@ The leftover scan looks beside an `html=`, `body=`, or `modules=` path, and
 skips a folder that holds Python sources or a `package.json`, since that is a
 source folder rather than a build folder. A `dist/` beside your server module
 is scanned; a package's own `static/` is not.
+
+Size is worth a glance for the same reason: tens of KB cost nothing, but a
+page of several hundred is one the host carries in a tool result and caches
+per connector. The usual cause is a dependency inlined whole — a namespace
+import (`import { z } from "zod"`) can pull in everything a library exports,
+where named imports pull in what you use; loading it from an https URL moves
+it out of the page entirely.
 
 Files are read when the `Widget` is built, so restart the server after a
 rebuild, and remember that hosts cache a widget per connector.

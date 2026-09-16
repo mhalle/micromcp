@@ -661,6 +661,25 @@ def _hashed(name) -> bool:
     return any(c.isdigit() for c in tail) or mixed or hexish
 
 
+# A page this large is worth a word: the host fetches a widget per connector and caches
+# it there, and the page travels inside a tool result on the way. Tens of KB cost nothing;
+# hundreds mean something was inlined that did not need to be.
+_BIG_PAGE = 250_000
+
+
+def _size(what, html, inline) -> None:
+    """Warn about a page big enough to be felt, naming its largest script."""
+    size = len(html.encode("utf-8"))
+    if size < _BIG_PAGE:
+        return
+    biggest = max((len(s.encode("utf-8")) for s in inline), default=0)
+    log.warning("%s: its page is %.0f KB, and a host fetches and caches it per connector, "
+                "inside a tool result%s. Something is inlined that need not be: a library "
+                "from an https URL is fetched once by the browser instead, and a bundler's "
+                "namespace import can pull in far more than the code uses", what, size / 1024,
+                f" (its largest script is {biggest / 1024:.0f} KB)" if biggest else "")
+
+
 def _some(names) -> str:
     """A few of them, quoted, for a log line."""
     return ", ".join(repr(n) for n in sorted(names)[:5]) + (" ..." if len(names) > 5 else "")
@@ -841,6 +860,7 @@ class Widget:
                              f"script and nothing runs. Rebuild it with a bundler that escapes "
                              f"the '<' (esbuild and Vite do), or inline that script with "
                              f"scripts=/modules= and escape_scripts=True")
+        _size(what, self.html, inline)
         has_other = any(_OTHER_CLIENT_RE.search(s) for s in inline if BRIDGE_JS not in s)
         if BRIDGE_JS in self.html and has_other:
             log.warning("%s: the page carries another MCP Apps client as well as micromcp's "

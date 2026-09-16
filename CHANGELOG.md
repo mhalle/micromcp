@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### MCP Apps
+- A widget whose page runs to a few hundred KB is warned about, with its size
+  and that of its largest script. A host fetches a widget per connector and
+  caches it there, and the page travels inside a tool result, so an inlined
+  dependency is paid for in a way an ordinary web page's is not — a namespace
+  import of a validation library, for one, can cost several hundred KB where
+  named imports cost a few.
+
 ## 0.2.0 — 2026-09-16 (tagged; not yet on PyPI)
 
 MCP Apps widgets, an OAuth token-validation helper, and the core fixes that
