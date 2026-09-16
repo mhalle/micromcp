@@ -1,0 +1,9 @@
+var e=document.getElementById(`root`),t=`kitchen`,n=(e,t)=>{let n=Math.min(...e),r=Math.max(...e)-n||1,i=(t,i)=>[i/(e.length-1)*100,60-(t-n)/r*52],a=e.map((e,t)=>`${t?`L`:`M`}${i(e,t).map(e=>e.toFixed(2))}`).join(` `);return t?`${a} L100,60 L0,60 Z`:a},r=({sensor:e,unit:t,values:r,label:i})=>{let a=r[r.length-1],[o,s]=[100,60-(a-Math.min(...r))/(Math.max(...r)-Math.min(...r)||1)*52];return`
+    <header><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAIAAABvFaqvAAAAzklEQVR42mP4TyXAQHODXBovuzZfcmu96N5+waPzvGf3Oc/ec179Z0kwyLn+Ci5TvCee8Zl82nfqKcIGEWOK3/ST/jNP4DOIeFMCZp8ImHMcu0GkmhI471jQgqNYDCLDlOBFR9ANIs+UkCWHQ5cdQjGIbFPCVhxEMYhsU8JWoRpEtinhaw6gGES2KRHr9qMYRLYpkRv2oRpErilRm/aiGES2KdFb9qAnSEpMQTGIDFNitu3GnmnJNgVLMUKeKdgLNjJMwVfUEgxduhf+pAIAw6MLt77RS8gAAAAASUVORK5CYII=" alt=""><h1>${i}</h1></header>
+    <div class="reading"><span class="now">${a.toFixed(1)}</span><span class="unit">${t}</span></div>
+    <div class="range">${r.length} readings · low ${Math.min(...r).toFixed(1)} · high ${Math.max(...r).toFixed(1)}</div>
+    <svg viewBox="0 0 100 62" preserveAspectRatio="none" aria-label="${i} over time">
+      <path class="area" d="${n(r,!0)}"/><path class="line" d="${n(r)}"/>
+      <circle cx="${o}" cy="${s.toFixed(2)}" r="2.5"/>
+    </svg>
+    <div class="chips">${[`kitchen`,`attic`,`cellar`].map(t=>`<button data-sensor="${t}" aria-pressed="${t===e}">${t}</button>`).join(``)}</div>`};async function i(n){try{let i=(await mcp.callTool(`readings`,{sensor:n})).structuredContent;t=i.sensor,e.innerHTML=r(i),mcp.setContext(`The user is watching the ${i.label.toLowerCase()}: ${i.values[i.values.length-1].toFixed(1)}${i.unit} now.`,i)}catch(t){e.innerHTML=`<p class="err">${t.message}</p>`}}e.addEventListener(`click`,e=>{let n=e.target.closest(`button[data-sensor]`);n&&n.dataset.sensor!==t&&i(n.dataset.sensor)}),await mcp.ready,i(t);

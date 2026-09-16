@@ -110,6 +110,12 @@
   inlined as `data:` URLs are blocked by the default policy's `font-src`, so
   a vendored stylesheet belongs on its CDN, and Leaflet needs
   `L.Icon.Default.imagePath = ""` before its icons are pointed at data URLs.
+- `examples/mcp_app_bundled.py`: the bundling recipe as a runnable file. Its
+  `examples/bundled_ui/` is an ordinary Vite project whose build writes the two
+  files the widget takes, with the logo inlined as a `data:` URL in both the
+  module and the stylesheet; the build is committed, so the example runs
+  without node installed. There was no bundled-widget example before, which is
+  what readers of that section kept having to invent.
 - Three example apps were built against the docs — a charts dashboard, a
   Leaflet map, and a server-rendered kanban board — and fixed what they hit.
   `mcp.callTool` forwards a `fragment(context=...)` update, which until now
