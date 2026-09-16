@@ -46,6 +46,15 @@ def raises(fn, exc=ValueError):
     return None
 
 
+def message(fn):
+    """The text of whatever a call raises: some messages are the feature."""
+    try:
+        fn()
+    except Exception as e:  # noqa: BLE001 - the message is what is under test
+        return str(e)
+    return ""
+
+
 def client(mcp, authenticate=None):
     srv = Server(mcp, authenticate=authenticate)
 
@@ -418,6 +427,48 @@ heard.clear()
 Widget("leftover", body="<p>x</p>", modules=[build / "widget.js"], styles=[build / "widget.css"])
 check("files left beside a module are warned about (source maps are not)",
       [("assets/w-a1.js" in m, ".map" in m) for m in heard if "'leftover'" in m], [(True, False)])
+check("passing neither body= nor html= says so",
+      "neither" in message(lambda: Widget("none", modules=["window.a = 1"])), True)
+check("passing both says so",
+      "both" in message(lambda: Widget("two", body="<p>x</p>", html="<html></html>")), True)
+vendored_css = pathlib.Path(tempfile.mkdtemp()) / "katex.min.css"
+vendored_css.write_text('@font-face{src:url(fonts/KaTeX.woff2)}')
+check("a vendored stylesheet is pointed at its CDN, not at a Path",
+      "CDN" in message(lambda: Widget("katex", body="<p>x</p>", styles=[vendored_css])), True)
+hexdir = pathlib.Path(tempfile.mkdtemp())
+(hexdir / "widget.js").write_text("window.w = 1")
+(hexdir / "chunk-deadbeef.js").write_text("x")   # a hex hash, no digits
+(hexdir / "sw.js").write_text("x")               # a worker, never inlined
+heard.clear()
+Widget("hexworker", body="<p>x</p>", modules=[hexdir / "widget.js"])
+said = " ".join(m for m in heard if "'hexworker'" in m)
+check("a hex hash and a worker both count as leftovers",
+      ("chunk-deadbeef.js" in said, "sw.js" in said), (True, True))
+
+vite8 = pathlib.Path(tempfile.mkdtemp())
+(vite8 / "widget.js").write_text("window.w = 1")
+(vite8 / "lazy-DuOUKcfe.js").write_text("x")     # a Vite 8 hash, all letters
+heard.clear()
+Widget("vitehash", body="<p>x</p>", modules=[vite8 / "widget.js"])
+check("a letter-only content hash counts as leftover output",
+      any("lazy-DuOUKcfe.js" in m for m in heard if "'vitehash'" in m), True)
+
+# a complete page needs some MCP Apps client, or window.mcp is undefined
+plain = '<!doctype html><html><head></head><body><div id=app></div></body></html>'
+heard.clear()
+Widget("noclient", html=plain)
+check("a page with no MCP Apps client is warned about",
+      any("no MCP Apps client" in m for m in heard if "'noclient'" in m), True)
+heard.clear()
+Widget("withbridge", html=plain, bridge=True)
+check("... but not when bridge=True adds one",
+      [m for m in heard if "'withbridge'" in m], [])
+heard.clear()
+Widget("extapps", html='<!doctype html><html><head></head><body><script>'
+                       'const M = "ui/notifications/initialized";</script></body></html>')
+check("... nor when the page brings its own client",
+      [m for m in heard if "'extapps'" in m], [])
+
 templates = pathlib.Path(tempfile.mkdtemp())
 for n in ("a.html", "b.html"):
     (templates / n).write_text("<p>x</p>")
@@ -484,13 +535,6 @@ Widget("jsdoc", body="<p>x</p>", scripts=["// see `line.from`/`line.to` for the 
 check("a JSDoc backtick path is not reported as a load", [m for m in heard if "'jsdoc'" in m], [])
 
 # an unreadable file says which argument, and is never blocked on
-def message(fn):
-    try:
-        fn()
-    except Exception as e:  # noqa: BLE001 - the message is what is under test
-        return str(e)
-    return ""
-
 bad = pathlib.Path(tempfile.mkdtemp())
 (bad / "latin.html").write_bytes(b"<p>caf\xe9</p>")
 (bad / "sub").mkdir()
