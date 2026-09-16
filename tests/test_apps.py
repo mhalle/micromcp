@@ -404,6 +404,17 @@ for label, kw, want in [
         ("an import mentioned mid-statement",
          {"modules": ['var doc = "run import \'./x.js\' first";']}, None)]:
     check(f"module imports: {label}", raises(lambda k=kw: Widget("mod", body="<p>x</p>", **k)), want)
+ESM3 = "https://cdn.jsdelivr.net/npm/three@0.186.0/"
+heard.clear()
+Widget("mapped", body="<p>x</p>",
+       imports={"three": ESM3 + "build/three.module.js", "three/addons/": ESM3 + "examples/jsm/"},
+       modules=['import * as T from "three";\nimport {OrbitControls} from '
+                '"three/addons/controls/OrbitControls.js";\nwindow.T = [T, OrbitControls];'])
+check("an import map's own specifiers are not reported as paths",
+      [m for m in heard if "'mapped'" in m], [])
+check("... while one it does not map is still refused",
+      raises(lambda: Widget("unmapped", body="<p>x</p>", imports={"three": ESM3 + "build/t.js"},
+                            modules=['import {x} from "four/addons/y.js";'])), "ValueError")
 heard.clear()
 Widget("dyn", body="<p>x</p>", modules=['if (window.x) import("./late.js");'])
 check("a dynamic import in a module is warned about, not refused",

@@ -457,6 +457,7 @@ class _Loads(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.base = self.base_at = None
         self.loads, self.scripts, self.styles, self._open, self._buf = [], [], [], None, []
+        self.mapped: set[str] = set()             # specifiers the page's import map resolves
         self._doc, self._depth, self._template, self._foreign = doc, depth, 0, 0
 
     def handle_startendtag(self, tag, attrs):
@@ -545,6 +546,7 @@ class _Loads(HTMLParser):
             maps = [spec.get("imports")]
             if isinstance(spec.get("scopes"), dict):
                 maps += list(spec["scopes"].values())
+            self.mapped |= {k for m in maps if isinstance(m, dict) for k in m if isinstance(k, str)}
             self.loads += [(url, "<script type=importmap>") for m in maps if isinstance(m, dict)
                            for url in m.values() if isinstance(url, str)]
         elif kind_type in ("", "module", "text/javascript", "application/javascript"):
@@ -595,6 +597,7 @@ def _check_urls(doc, what):
         imports = {m.group(2) for m in _JS_IMPORT_RE.finditer(source)}
         refs = {m.group(2) for m in _JS_META_URL_RE.finditer(source) if _relative(m.group(2))}
         refs |= {m.group(2) for m in _JS_ASSET_RE.finditer(source)} - imports
+        imports, refs = _unmapped(imports, parser.mapped), _unmapped(refs, parser.mapped)
         if imports:
             log.warning("%s: a script imports %s at run time, which a widget cannot fetch "
                         "(harmless if the import never runs; otherwise bundle that chunk in, "
@@ -659,6 +662,13 @@ def _hashed(name) -> bool:
     mixed = any(c.isupper() for c in tail) and any(c.islower() for c in tail)
     hexish = len(tail) >= 8 and all(c in "0123456789abcdefABCDEF" for c in tail)
     return any(c.isdigit() for c in tail) or mixed or hexish
+
+
+def _unmapped(names, mapped) -> set:
+    """The names an import map does not resolve: a specifier it names outright, or one
+    under a prefix key of its own (`"three/addons/"` covers `three/addons/x.js`)."""
+    prefixes = tuple(k for k in mapped if k.endswith("/"))
+    return {n for n in names if n not in mapped and not n.startswith(prefixes)}
 
 
 def _some(names) -> str:
