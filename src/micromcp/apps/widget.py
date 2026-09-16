@@ -443,11 +443,11 @@ class _Loads(HTMLParser):
     """The URLs a page loads (with where they appear), its `<base href>` and
     how many loads come before it, and the text of its inline scripts."""
 
-    def __init__(self, depth=0):
+    def __init__(self, doc="", depth=0):
         super().__init__(convert_charrefs=True)
         self.base = self.base_at = None
         self.loads, self.scripts, self._open, self._buf = [], [], None, []
-        self._depth, self._template, self._foreign = depth, 0, 0
+        self._doc, self._depth, self._template, self._foreign = doc, depth, 0, 0
 
     def handle_startendtag(self, tag, attrs):
         """`<style/>` and friends: outside foreign content a browser ignores the
@@ -485,7 +485,7 @@ class _Loads(HTMLParser):
         for url in _css_urls(a.get("style", "")):
             self.loads.append((url, f"<{tag} style>"))
         if tag == "iframe" and a.get("srcdoc") and self._depth < 3:   # resolves against us
-            inner = _Loads(self._depth + 1)
+            inner = _Loads(a["srcdoc"], self._depth + 1)
             inner.feed(a["srcdoc"])
             inner.close()
             self.loads += [(url, f"<iframe srcdoc> {where}") for url, where in inner.loads]
@@ -498,9 +498,18 @@ class _Loads(HTMLParser):
 
     def close(self):
         """A style or script left unclosed at the end of the page still counts:
-        a browser parses it to the end of the file."""
+        a browser parses it to the end of the file. Some Python versions drop
+        that trailing text, so take it from the document instead."""
         super().close()
-        self._flush(self._open[0] if self._open else None)
+        if not self._open:
+            return
+        kind = self._open[0]
+        if not self._buf:
+            start = self._doc.lower().rfind(f"<{kind}")
+            end = self._doc.find(">", start) if start >= 0 else -1
+            if end >= 0:
+                self._buf = [self._doc[end + 1:]]
+        self._flush(kind)
 
     def handle_endtag(self, tag):
         if tag == "template" and self._template:
@@ -537,7 +546,7 @@ def _check_urls(doc, what):
     assets, and `public/` files all end up this way). Relative paths inside
     inline scripts are only logged, since they may be mere strings. Loads that
     follow a valid https `<base href>` resolve against it and pass."""
-    parser = _Loads()
+    parser = _Loads(doc)
     try:
         parser.feed(doc)
         parser.close()
