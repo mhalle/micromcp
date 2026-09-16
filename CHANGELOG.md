@@ -98,6 +98,24 @@
   declares `window.mcp` for TypeScript. `docs/apps.md` covers Vite (checked
   with 8.3), workers and WASM, vendored CSS that loads fonts, and Bun
   (checked with 1.4.0).
+- Documentation, after agents reproduced it from scratch: `docs/apps.md` now
+  carries a runnable server that shows a widget in the dev host (the dev host
+  is a browser client, so it needs the server's `allowed_origins=`; without
+  that every call failed with `-32020` and the section could not be
+  followed), states the bridge API and that `await mcp.ready` comes first,
+  gives the checks as a table of what is refused, what is warned about, and
+  what to do, documents `csp=` as the dict of origin buckets it is (its
+  previous example strings were all refused), and adds an esbuild recipe
+  (checked with 0.28). Two claims were wrong and are corrected: fonts
+  inlined as `data:` URLs are blocked by the default policy's `font-src`, so
+  a vendored stylesheet belongs on its CDN, and Leaflet needs
+  `L.Icon.Default.imagePath = ""` before its icons are pointed at data URLs.
+- A widget whose page carries no MCP Apps client at all is now warned about,
+  since `window.mcp` would be undefined; a bundler's leftovers are also
+  recognised when the hash holds no digit (Vite 8 writes `lazy-DuOUKcfe.js`)
+  or the file is named like a worker; `Widget` with neither `body=` nor
+  `html=` says so rather than complaining about both; and a relative URL in
+  a stylesheet points at the CDN remedy that works.
 - Model context: `fragment(context=)` and `mcp.setContext()` send
   `ui/update-model-context` (text plus data as a labeled JSON block);
   `mcp.say()` and `data-mcp-say` send `ui/message`.

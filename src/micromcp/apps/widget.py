@@ -561,10 +561,14 @@ def _check_urls(doc, what):
     if bad:
         url, where = bad[0]
         more = f" (and {len(bad) - 1} more)" if len(bad) > 1 else ""
+        hint = ("a vendored stylesheet does not bring the fonts and images beside it, so pass "
+                "its CDN https URL to styles= instead of the file"
+                if where in ("<style>", "<link href>") else
+                "inline it (data: URLs, or scripts=/styles= with a pathlib.Path) or load it "
+                "from an https URL")
         raise ValueError(f"{what} loads {url!r} ({where}){more}, a relative URL, and a widget "
-                         f"has no origin to load it from: inline it (data: URLs, or "
-                         f"scripts=/styles= with a pathlib.Path) or load it from an https URL. "
-                         f"See 'Bundling widgets' in docs/apps.md")
+                         f"has no origin to load it from: {hint}. See 'Bundling widgets' in "
+                         f"docs/apps.md")
     if exempt is not None:
         return parser.scripts
     for source in parser.scripts:
@@ -572,8 +576,10 @@ def _check_urls(doc, what):
         refs |= {m.group(2) for m in _JS_META_URL_RE.finditer(source) if _relative(m.group(2))}
         refs |= {m.group(2) for m in _JS_ASSET_RE.finditer(source)}
         if refs:
-            log.warning("%s: an inline script refers to %s, relative paths a widget cannot "
-                        "load (ignore this if they are only strings)", what,
+            log.warning("%s: a script in the page refers to %s, paths a widget cannot load "
+                        "(harmless if they are only strings; if a bundler wrote them, inline "
+                        "those assets — Vite's assetsInlineLimit, esbuild's "
+                        "--loader:.png=dataurl)", what,
                         ", ".join(sorted(refs)[:5]) + (" ..." if len(refs) > 5 else ""))
     return parser.scripts
 
@@ -585,6 +591,8 @@ _ASSET_SUFFIXES = {".js", ".mjs", ".css", ".wasm", ".json", ".png", ".jpg", ".jp
 # icon breaks nothing, which is why `<link rel=icon>` is not a load either.
 _BUILD_DIRS = {"assets", "chunks", "_app", "_next", "static", "public", "js", "css",
                "fonts", "img", "images", "media"}
+# A worker is never inlined by default, and its name rarely carries a hash.
+_WORKER_RE = re.compile(r"(?:^|[-.])(?:sw|service-worker|.*worker)\.m?js$", re.I)
 
 
 def _walk(folder):
@@ -618,11 +626,16 @@ def _subdirs(folder, files=False):
 
 
 def _hashed(name) -> bool:
-    """A bundler's content-hashed file name: `index-a1b2c3d4.js`, `main.3f2a1b.css`.
+    """A bundler's content-hashed file name: `index-a1b2c3d4.js`, `main.3f2a1b.css`,
+    `lazy-DuOUKcfe.js` (Vite 8 writes base64, which may hold no digit at all).
     A hand-kept `jquery.min.js` or `three.module.js` is not one."""
     stem, _, _ = name.rpartition(".")
     tail = re.split(r"[-.]", stem)[-1] if re.search(r"[-.]", stem) else ""
-    return len(tail) >= 6 and any(c.isdigit() for c in tail) and any(c.isalpha() for c in tail)
+    if len(tail) < 6:
+        return False                     # min, esm, core: a word, not a hash
+    mixed = any(c.isupper() for c in tail) and any(c.islower() for c in tail)
+    hexish = len(tail) >= 8 and all(c in "0123456789abcdefABCDEF" for c in tail)
+    return any(c.isdigit() for c in tail) or mixed or hexish
 
 
 def _leftovers(what, checked, passed):
@@ -641,7 +654,8 @@ def _leftovers(what, checked, passed):
         for f in itertools.islice(_walk(folder), 20000):
             rel = f.relative_to(folder)
             if f.suffix.lower() in _ASSET_SUFFIXES and f not in passed \
-                    and (_hashed(f.name) or rel.parts[0] in _BUILD_DIRS):
+                    and (_hashed(f.name) or rel.parts[0] in _BUILD_DIRS
+                         or _WORKER_RE.match(f.name)):
                 extra.append(rel.as_posix())
         if extra:
             log.warning("%s: %s also holds %s, which the widget cannot load (a bundler's split "
@@ -771,8 +785,9 @@ class Widget:
                 or re.search(r"[\s\x00-\x1f\x7f]", self.uri):
             raise ValueError(f"widget uri {self.uri!r} must be a plain ui:// URI")
         if (body is None) == (html is None):
-            raise TypeError("Widget: give body= (a page built around the bridge) or html= "
-                            "(a complete document of your own), not both")
+            raise TypeError("Widget: give exactly one of body= (a page built around the "
+                            "bridge) or html= (a complete document of your own); you passed "
+                            + ("both" if body is not None else "neither"))
         if html is not None:
             if scripts or modules or styles or head or imports or escape_scripts:
                 raise TypeError("Widget(html=...) is used verbatim; scripts/modules/styles/"
@@ -798,12 +813,17 @@ class Widget:
                              f"script and nothing runs. Rebuild it with a bundler that escapes "
                              f"the '<' (esbuild and Vite do), or inline that script with "
                              f"scripts=/modules= and escape_scripts=True")
-        if BRIDGE_JS in self.html and any("ui/notifications/initialized" in s
-                                          for s in inline if BRIDGE_JS not in s):
+        has_other = any("ui/notifications/initialized" in s for s in inline
+                        if BRIDGE_JS not in s)
+        if BRIDGE_JS in self.html and has_other:
             log.warning("%s: the page carries another MCP Apps client as well as micromcp's "
                         "bridge (it names ui/notifications/initialized): that is two "
                         "handshakes with the host. Use one: drop bridge=True, or the other "
                         "client", what)
+        elif BRIDGE_JS not in self.html and not has_other:
+            log.warning("%s: its page carries no MCP Apps client, so window.mcp is undefined "
+                        "and its tool calls cannot reach the host; pass bridge=True to add "
+                        "micromcp's bridge, or bundle a client into the page", what)
         _leftovers(what, [html, body, *_items(modules)],
                    [html, body, *_items(scripts), *_items(modules), *_items(styles)])
         if csp is not None and not isinstance(csp, dict):
