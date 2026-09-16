@@ -53,6 +53,16 @@ tool publishes the widget as `ui://<name>` with the MCP App MIME type. For a
 tool you register yourself, `board.register(mcp)` publishes the resource and
 `board.tool_meta` is the pointer to pass as `meta=`.
 
+`scripts=` are classic scripts and `modules=` are `type="module"` ones, so a
+package's `.esm.js` build belongs in `modules=` and its UMD or global build in
+`scripts=`. Vendor a library with `npm pack htmx.org@4` (it unpacks to
+`package/dist/...`), and inline your own images yourself, since there is no
+bundler to do it:
+
+```python
+LOGO = "data:image/png;base64," + base64.b64encode(Path("logo.png").read_bytes()).decode()
+```
+
 Assets in `scripts=`, `modules=`, and `styles=` are source text,
 `pathlib.Path`s (inlined), or https URLs (loaded; their origins are declared
 in the resource's `_meta.ui.csp.resourceDomains` for you). Scripts and
@@ -85,13 +95,21 @@ as in the dev host. `imports=` writes an import map, so modules can
 `import ... from "three"` (its origins are declared the same way; see
 `examples/mcp_app_3d.py`, a three.js scene the model builds with tools and the
 user selects in). `csp=` adds origins, `border=` sets `prefersBorder`,
-`route=` and `fetch=` are covered below.
+`route=` and `fetch=` are covered below. A widget's resource is `ui://<name>`
+unless `uri=` says otherwise, and the name takes letters, digits, `.`, `_`,
+and `-`; two widgets cannot share a URI on one server.
 
 Widgets must be static: hosts fetch a `ui://` resource under their own
 identity and cache it per connector, so per-user data belongs in tool results
 and fragments (see the core README's UI apps section).
 
 ## Writing the HTML
+
+`fragment()` answers an app-only tool with HTML for the widget to swap in;
+`fragment(html, status=, content_type=, context=)` sets the synthesized
+response's status and media type, and `context=` tells the model what changed
+in the same result. `Widget(body=)` and `Widget(html=)` also take a
+`pathlib.Path`, which is read when the widget is built.
 
 `fragment()`, `page()`, and `Widget(body=, head=, html=)` take a str or any
 object that renders itself through `__html__`, the protocol Jinja and
@@ -139,7 +157,10 @@ without hashes.
 
 **One module and one stylesheet; micromcp writes the page.** The page then
 carries the bridge, so the app calls `mcp.callTool(...)`,
-`mcp.setContext(...)`, and `mcp.channel(...)`. With Vite (checked with 8.3):
+`mcp.setContext(...)`, and `mcp.channel(...)`. Install micromcp as the server
+needs it (`pip install micromcp`, or from git until the first release), and
+the bundler as the app needs it — `npm init -y && npm i -D vite` — then, with
+Vite (checked with 8.3):
 
 ```js
 // vite.config.js — package.json needs "type": "module", or name this file .mjs
@@ -149,11 +170,11 @@ export default defineConfig({
   build: {
     target: "es2022",                 // top-level await, if the app uses it
     cssCodeSplit: false,              // one stylesheet, once there is more than one entry
-    assetsInlineLimit: 100_000_000,   // images and fonts become data: URLs
+    assetsInlineLimit: 100_000_000,   // images become data: URLs — but see fonts, below
     rollupOptions: {
       input: "src/main.ts",           // no index.html: micromcp writes the page
       output: {
-        codeSplitting: false,         // one file (before Vite 8: inlineDynamicImports: true)
+        codeSplitting: false,         // one file (Vite 8+; before it, inlineDynamicImports)
         entryFileNames: "widget.js",
         assetFileNames: "widget.[ext]",
       },
@@ -174,6 +195,29 @@ chart = Widget("chart", title="Chart", body='<div id="root"></div>',
 There is nothing else to configure: the widget's tools, and a server that
 shows it in the dev host, are in "The dev host" below.
 
+Two things about that config are worth knowing. `assetFileNames:
+"widget.[ext]"` gives stable names to pass, but it also strips the content
+hash micromcp's leftover-file warning looks for, so check `dist/` yourself:
+anything besides `widget.js` and `widget.css` was left behind. And the inline
+limit inlines fonts as well as images, which a host's `font-src` then refuses
+— keep web fonts on a declared https origin, and micromcp warns if one ends
+up inlined. A misspelled `codeSplitting` is ignored silently and the chunks
+come back, so if a refusal names `./assets/...`, check that key first.
+
+For one complete page instead, `vite-plugin-singlefile` inlines the JS and
+CSS; the assets still need the limit, and `index.html` stays the entry:
+
+```js
+// vite.config.js, for the single-file shape
+import { defineConfig } from "vite";
+import { viteSingleFile } from "vite-plugin-singlefile";
+
+export default defineConfig({
+  plugins: [viteSingleFile()],
+  build: { target: "es2022", cssCodeSplit: false, assetsInlineLimit: 100_000_000 },
+});
+```
+
 **With esbuild** (checked with 0.28), the same two files come out of one
 command, the stylesheet from the entry's `import "./app.css"`:
 
@@ -183,26 +227,46 @@ npx esbuild src/main.js --bundle --minify --format=esm --target=es2022 \
 ```
 
 Give `--loader:...=dataurl` for every asset extension the app imports; a
-`url()` in bundled CSS is inlined the same way.
+`url()` in bundled CSS is inlined the same way. esbuild leaves `</script` raw
+in its output, as any JS bundler does, so pass `escape_scripts=True` with it.
 
 **With Bun** (checked with 1.4.0), prefer the single-file shape: `bun build
 --compile --target=browser --production index.html --outdir dist` writes a
 self-contained `dist/index.html`, images imported from scripts included, to
-pass as `html=`. `--compile` is what makes it one file; without it Bun emits
-split, content-hashed files and a stub `index.html` of relative references,
-which micromcp refuses. The one-module shape works too (`bun build
-src/main.ts --outdir dist --production`, with the CSS imported from the
-entry), but it does not inline everything: an image imported from a script
-becomes a separate file, or an empty string under the `dataurl` loader, and
-images in CSS are inlined only under the default loader, so keep a Bun
-module's images in CSS. Do not add `--asset-naming "[name].[ext]"`: it strips
-the content hash that micromcp's leftover-file warning looks for, which is
-the one thing that would have told you an asset was left behind. Pass
+pass as `html=` with `bridge=True`, since a Bun build brings no MCP Apps
+client. `--compile` is what makes it one file; without it Bun emits split,
+content-hashed files and a stub `index.html` of relative references, which
+micromcp refuses. `--target=browser` is not optional either: without it
+`--compile` means Bun's standalone-executable build, and it fails with
+`cannot use --compile with --outdir`.
+
+The one-module shape works too. `bun build src/main.tsx --outdir dist
+--production`, with the CSS imported from the entry, writes `dist/main.js`
+and `dist/main.css` — named after the entry, not "widget" — and they need
+`escape_scripts=True`, because Bun leaves `</script` raw in a `.js` output
+and React's production build contains one:
+
+```python
+chart = Widget("chart", body='<div id="root"></div>', escape_scripts=True,
+               modules=[UI / "main.js"], styles=[UI / "main.css"])
+```
+
+That shape does not inline everything: an image imported from a script stays
+a separate file, so keep a Bun module's images in CSS, where the default
+loader inlines them. (Bun's CLI has no `--loader` flag — esbuild's
+`--loader:.png=dataurl` is accepted and silently ignored — and setting
+`loader: {".png": "dataurl"}` through `Bun.build()` makes such an import an
+empty string and rewrites a CSS `url()` to an absolute filesystem path, so
+leave the loader alone.) Do not add `--asset-naming "[name].[ext]"` either:
+it strips the content hash that micromcp's leftover-file warning looks for,
+which is the clearest signal that an asset was left behind. Pass
 `--production` in either shape, or React ships its development build (1.1 MB
 rather than 215 KB).
 
 **The bridge.** Wait for the handshake before the first call: `await
-mcp.ready`. Then `mcp.callTool(name, args?)` resolves to `{content,
+mcp.ready`. The bridge also dispatches an `mcp:ready` DOM event when the
+handshake completes, which is what `hx-trigger="mcp:ready"` fires on in the
+hypermedia examples. Then `mcp.callTool(name, args?)` resolves to `{content,
 structuredContent, isError}`, `mcp.setContext(text, data?)` tells the model
 what the user sees, `mcp.say(text)` posts as the user, `mcp.channel(name)`
 opens a channel, and `mcp.fetch(url, init?)` routes a request through the
@@ -215,9 +279,13 @@ For TypeScript, `BRIDGE_TYPES` declares `window.mcp`:
 python -c "from micromcp.apps import BRIDGE_TYPES; print(BRIDGE_TYPES)" > src/mcp-bridge.d.ts
 ```
 
-It needs no import: it declares the global. With Vite, add `"types":
-["vite/client"]` to `tsconfig.json` as well, or importing `./logo.png` from
-TypeScript is an error.
+It needs no import: it declares the global. Neither Vite nor Bun typechecks
+while bundling, so run `npx tsc --noEmit` yourself; a widget with type errors
+builds and ships. With Vite, add `"types": ["vite/client"]` to
+`tsconfig.json`, or importing `./logo.png` is an error; with Bun, add `"DOM"`
+to `lib` and declare the asset modules yourself. A tool result's
+`structuredContent` is optional, as the types say, so read it as
+`r.structuredContent?.rolled` or narrow it once.
 
 **One complete page.** A single-file build (Vite with
 `vite-plugin-singlefile`, say, which inlines the assets itself) is used
@@ -231,22 +299,27 @@ rewritten.
 
 **What micromcp checks when the widget is built.** A page that loads a
 relative URL is refused, naming the URL and where it appears, because the
-host has no origin to fetch it from. The rest is warnings, on the
-`micromcp.apps` logger (Python prints them to stderr unless you configure
-logging).
+host has no origin to fetch it from. The first five rows below are refusals,
+raised as a `ValueError` when the `Widget` is built; the rest are warnings on
+the `micromcp.apps` logger (Python prints them to stderr unless you configure
+logging). Arguments are validated too, and those refusals say what they want:
+a name's character set, an https-only URL, the `csp=` buckets, `fetch=`, the
+size of a context update, and a `ui://` already taken.
 
 | micromcp sees | Result | What to do |
 | --- | --- | --- |
 | a relative `src`/`href`/`srcset`/`background`, `url()`, `image-set()`, `@import`, import-map entry, or `srcdoc`/`<template>` content | refused | inline the asset as a data URL, or load it from an https URL |
 | a module whose static `import` names a relative path or a bare specifier (`import {clone} from "lodash-es"`) | refused | bundle the dependency in, or map it with `imports={"lodash-es": "https://esm.sh/lodash-es"}` |
 | `</script` inside an inlined script | refused | `escape_scripts=True` rewrites it, as bundlers do |
-| an inlined script that ends inside `<!--` … `<script` | refused | `escape_scripts=True` closes it with `//-->`; this is what Vue 3's development build needs |
+| an inlined script that ends inside `<!--` … `<script` (the tag name followed by a space, `/`, or `>`) | refused | `escape_scripts=True` closes it with `//-->`; this is what Vue 3's development build needs |
 | a complete `html=` page whose script would swallow the rest of it | refused | rebuild it with a bundler that escapes the `<` (esbuild and Vite do) |
-| a relative path or asset string inside a classic script | warned | it may be a mere string; if a bundler wrote it, raise the inline limit |
-| a dynamic `import("./x.js")` | warned | it may never run; bundle it in if it does |
+| a relative or root-absolute path (`./x.png`, `/x.png`) inside a classic script | warned | it may be a mere string; if a bundler wrote it, raise the inline limit |
+| a script that fetches a chunk at run time — `import("./x.js")` — | warned | harmless if it never runs; otherwise bundle the chunk in, or map it with `imports=` |
 | an asset file next to what you passed that carries a content hash, sits in an `assets/`-style folder, or is named like a worker | warned | you left part of the build behind: pass it, or inline it |
-| no MCP Apps client in an `html=` page | warned | `bridge=True`, or bundle a client |
-| two clients (micromcp's bridge and another) | warned | keep one |
+| a font inlined as a `data:` URL | warned | a host's `font-src` refuses it; serve the font from a declared https origin |
+| no MCP Apps client micromcp recognises in an `html=` page | warned | pass `bridge=True`; if the page bundles a client micromcp cannot see, ignore it |
+| micromcp's own bridge already in the page, plus `bridge=True` | refused | leave `bridge=True` off |
+| micromcp's bridge beside another client it recognises | warned | keep one |
 
 Links, hypermedia attributes (`hx-get`, `fx-action`), `<link rel="icon">`,
 and `<noscript>` content are not loads. Loads after a valid https `<base
@@ -256,8 +329,9 @@ build trips the string warning by itself (it mentions `./MyComponent` in an
 error message), which is one more reason to build for production.
 
 The leftover scan looks beside an `html=`, `body=`, or `modules=` path, and
-skips a folder that holds Python sources (or whose parent does), so a build
-written next to your server module is not flagged and not scanned.
+skips a folder that holds Python sources or a `package.json`, since that is a
+source folder rather than a build folder. A `dist/` beside your server module
+is scanned; a package's own `static/` is not.
 
 Files are read when the `Widget` is built, so restart the server after a
 rebuild, and remember that hosts cache a widget per connector.
@@ -323,8 +397,11 @@ with the query, form, or JSON body as arguments. It is wired into htmx 4
 `Widget(fetch="global")` also replaces `window.fetch`, for libraries without
 a hook (Datastar). With htmx, call
 tools with `hx-post`: htmx rewrites a GET URL to its path, dropping `tool:`.
-Any other URL goes to the widget's `route=` tool — which is how existing
-Django views serve a widget:
+Any other URL goes to the widget's `route=` tool, which the page carries as
+`<meta name="mcp-route">`; a browser error naming that meta tag means the
+widget has no `route=`, or that an `hx-get` dropped the `tool:` scheme where
+`hx-post` would have kept it. This is how existing Django views serve a
+widget:
 
 ```python
 from micromcp.apps.django import django_routes
@@ -370,6 +447,11 @@ data)` does the same for client-side state (debounced), and `mcp.say(text)` or
 which does start a turn. From Django, `set_mcp_context(response, text, data)`
 (in `micromcp.apps.django`) on any response in a redirect chain has the same
 effect.
+
+A context update carries at most 16 000 bytes (`CONTEXT_LIMIT`), counting
+`text` and `data` together, and a larger one is refused when the result is
+built. `context=` also takes a bare string when there is nothing to put in
+`data`.
 
 What Claude did with them on 2026-09-14: each update **replaces** the
 widget's previous one (as the spec says), while separate widgets keep separate

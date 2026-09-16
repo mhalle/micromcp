@@ -139,7 +139,9 @@ def _script(source, module=False, escape=False):
         source = _SCRIPT_END_RE.sub(r"<\\/\1", source)
     elif "</script" in source.lower():
         raise ValueError("an inlined script contains '</script'; it would end the tag early "
-                         "(escape_scripts=True rewrites it as '<\\/script', as bundlers do)")
+                         "(escape_scripts=True rewrites it as '<\\/script'. A bundler escapes "
+                         "it when it writes the HTML itself, but not in a .js output: React's "
+                         "production build lands here)")
     if _script_state(source) == 2:
         if not escape:
             raise ValueError("an inlined script ends inside a '<!--' ... '<script' sequence, so "
@@ -336,6 +338,10 @@ _VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "me
 _RAW_TEXT = {"script", "style", "textarea", "title", "xmp", "noscript", "noembed",
              "noframes", "iframe"}
 _FOREIGN = {"svg", "math"}                  # a <base> in there is not the page's base
+# How another MCP Apps client shows up in a page: the handshake it speaks, the
+# package it came from, or the global it installs.
+_OTHER_CLIENT_RE = re.compile(r"ui/notifications/|ui/initialize|modelcontextprotocol"
+                              r"|mcp-?apps|window\.mcp\s*=|globalThis\.mcp\s*=", re.I)
 _SCHEME_RE = re.compile(r"[a-z][a-z0-9+.-]*:", re.I)
 _SPECIAL_RE = re.compile(r"https?:(?!//)", re.I)   # `http:x` is x, resolved against the page
 _URL_TRIM = "".join(map(chr, range(0x21)))  # what a browser trims around a URL
@@ -359,6 +365,9 @@ def _no_comments(css) -> str:
 _CSS_URL_RE = re.compile(r"""url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s("']*))\s*\)"""
                          r"""|@import\s*(?:layer\([^)]*\)\s*)?["']([^"']*)["']""", re.I)
 _CSS_IMAGE_SET_RE = re.compile(r"image-set\(([^)]{0,2000})\)", re.I)
+# An inlined font: a host's policy lists origins for font-src, never `data:`.
+_CSS_DATA_FONT_RE = re.compile(r"@font-face[^{}]{0,200}\{[^{}]{0,4000}?"
+                               r"url\(\s*[\"\']?data:", re.I)
 _CSS_STRING_RE = re.compile(r"""["']([^"']*)["']""")
 # Inline-script heuristics. Quotes include backticks, which Vite 8 writes for most
 # strings; a string followed by `:` or `(` is an object key or method, not a load.
@@ -374,9 +383,9 @@ _MODULE_IMPORT_RE = re.compile(r"""(?:^|[;}])\s*(?:import|export)\b"""
 _JS_META_URL_RE = re.compile(r"""\bnew\s+URL\(\s*"""
                              r"""(["'`])([^"'`$]+)\1\s*,\s*(?:(?:``|""|'')\s*\+\s*)?"""
                              r"""(?:self\.location|import\.meta\.url)""")
-_JS_ASSET_RE = re.compile(r"""(["'`])((?:\.{1,2})?/[\w./@%+-]+\.(?:png|jpe?g|gif|svg|webp|"""
-                          r"""avif|ico|bmp|woff2?|ttf|otf|eot|css|m?js|json|wasm|mp3|mp4|"""
-                          r"""webm|ogg|wav))\1(?!\s*[:(])""", re.I)
+_JS_ASSET_RE = re.compile(r"""(["'`])((?:\.{1,2}/|/)?[\w.@%+-]+(?:/[\w.@%+-]+)*"""
+                          r"""\.(?:png|jpe?g|gif|svg|webp|avif|ico|bmp|woff2?|ttf|otf|eot|"""
+                          r"""css|m?js|json|wasm|mp3|mp4|webm|ogg|wav))\1(?!\s*[:(])""", re.I)
 
 
 def _check_module_imports(source, what, imports):
@@ -446,7 +455,7 @@ class _Loads(HTMLParser):
     def __init__(self, doc="", depth=0):
         super().__init__(convert_charrefs=True)
         self.base = self.base_at = None
-        self.loads, self.scripts, self._open, self._buf = [], [], None, []
+        self.loads, self.scripts, self.styles, self._open, self._buf = [], [], [], None, []
         self._doc, self._depth, self._template, self._foreign = doc, depth, 0, 0
 
     def handle_startendtag(self, tag, attrs):
@@ -523,6 +532,7 @@ class _Loads(HTMLParser):
             return
         (kind, kind_type), text, self._open = self._open, "".join(self._buf), None
         if kind == "style":
+            self.styles.append(text)
             self.loads += [(url, "<style>") for url in _css_urls(text)]
         elif kind_type == "importmap":
             try:
@@ -561,26 +571,38 @@ def _check_urls(doc, what):
     if bad:
         url, where = bad[0]
         more = f" (and {len(bad) - 1} more)" if len(bad) > 1 else ""
-        hint = ("a vendored stylesheet does not bring the fonts and images beside it, so pass "
-                "its CDN https URL to styles= instead of the file"
-                if where in ("<style>", "<link href>") else
-                "inline it (data: URLs, or scripts=/styles= with a pathlib.Path) or load it "
-                "from an https URL")
+        if _hashed(url.rsplit("/", 1)[-1]):
+            hint = ("your bundler wrote a split build: rebuild it as one file (Vite's "
+                    "codeSplitting: false or vite-plugin-singlefile, Bun's --compile "
+                    "--target=browser)")
+        elif where in ("<style>", "<link href>"):
+            hint = ("a vendored stylesheet does not bring the fonts and images beside it, so "
+                    "pass its CDN https URL to styles= instead of the file")
+        else:
+            hint = ("inline it (data: URLs, or scripts=/styles= with a pathlib.Path) or load "
+                    "it from an https URL")
         raise ValueError(f"{what} loads {url!r} ({where}){more}, a relative URL, and a widget "
                          f"has no origin to load it from: {hint}. See 'Bundling widgets' in "
                          f"docs/apps.md")
+    if any(_CSS_DATA_FONT_RE.search(css) for css in parser.styles):
+        log.warning("%s: it inlines a font as a data: URL, which a host's font-src refuses "
+                    "(images and CSS inline fine, fonts do not); serve the font from an https "
+                    "origin instead. See 'Bundling widgets' in docs/apps.md", what)
     if exempt is not None:
         return parser.scripts
     for source in parser.scripts:
-        refs = {m.group(2) for m in _JS_IMPORT_RE.finditer(source)}
-        refs |= {m.group(2) for m in _JS_META_URL_RE.finditer(source) if _relative(m.group(2))}
-        refs |= {m.group(2) for m in _JS_ASSET_RE.finditer(source)}
+        imports = {m.group(2) for m in _JS_IMPORT_RE.finditer(source)}
+        refs = {m.group(2) for m in _JS_META_URL_RE.finditer(source) if _relative(m.group(2))}
+        refs |= {m.group(2) for m in _JS_ASSET_RE.finditer(source)} - imports
+        if imports:
+            log.warning("%s: a script imports %s at run time, which a widget cannot fetch "
+                        "(harmless if the import never runs; otherwise bundle that chunk in, "
+                        "or map it to an https URL with imports=)", what, _some(imports))
         if refs:
             log.warning("%s: a script in the page refers to %s, paths a widget cannot load "
                         "(harmless if they are only strings; if a bundler wrote them, inline "
                         "those assets — Vite's assetsInlineLimit, esbuild's "
-                        "--loader:.png=dataurl)", what,
-                        ", ".join(sorted(refs)[:5]) + (" ..." if len(refs) > 5 else ""))
+                        "--loader:.png=dataurl)", what, _some(refs))
     return parser.scripts
 
 
@@ -638,6 +660,11 @@ def _hashed(name) -> bool:
     return any(c.isdigit() for c in tail) or mixed or hexish
 
 
+def _some(names) -> str:
+    """A few of them, for a log line."""
+    return ", ".join(sorted(names)[:5]) + (" ..." if len(names) > 5 else "")
+
+
 def _leftovers(what, checked, passed):
     """Warn about a bundler's output left next to a page or module that was
     passed as a path but not passed itself: a widget inlines everything, so a
@@ -648,8 +675,8 @@ def _leftovers(what, checked, passed):
     passed = {pathlib.Path(p).resolve() for p in passed if isinstance(p, os.PathLike)}
     for folder in {pathlib.Path(p).resolve().parent for p in checked if isinstance(p, os.PathLike)}:
         if (folder / "package.json").exists() or (folder / "pyproject.toml").exists() \
-                or next(folder.glob("*.py"), None) or next(folder.parent.glob("*.py"), None):
-            continue
+                or next(folder.glob("*.py"), None):
+            continue                     # a source folder, not a build folder
         extra = []
         for f in itertools.islice(_walk(folder), 20000):
             rel = f.relative_to(folder)
@@ -813,17 +840,17 @@ class Widget:
                              f"script and nothing runs. Rebuild it with a bundler that escapes "
                              f"the '<' (esbuild and Vite do), or inline that script with "
                              f"scripts=/modules= and escape_scripts=True")
-        has_other = any("ui/notifications/initialized" in s for s in inline
-                        if BRIDGE_JS not in s)
+        has_other = any(_OTHER_CLIENT_RE.search(s) for s in inline if BRIDGE_JS not in s)
         if BRIDGE_JS in self.html and has_other:
             log.warning("%s: the page carries another MCP Apps client as well as micromcp's "
                         "bridge (it names ui/notifications/initialized): that is two "
                         "handshakes with the host. Use one: drop bridge=True, or the other "
                         "client", what)
         elif BRIDGE_JS not in self.html and not has_other:
-            log.warning("%s: its page carries no MCP Apps client, so window.mcp is undefined "
-                        "and its tool calls cannot reach the host; pass bridge=True to add "
-                        "micromcp's bridge, or bundle a client into the page", what)
+            log.warning("%s: no MCP Apps client is visible in its page, so window.mcp may be "
+                        "undefined and its tool calls would not reach the host. Pass "
+                        "bridge=True for micromcp's bridge; if the page bundles a client "
+                        "micromcp cannot recognise, ignore this", what)
         _leftovers(what, [html, body, *_items(modules)],
                    [html, body, *_items(scripts), *_items(modules), *_items(styles)])
         if csp is not None and not isinstance(csp, dict):
