@@ -565,6 +565,15 @@ heard.clear()
 Widget("pkgstatic", body=pkg / "myapp" / "static" / "widget.html")
 check("a Python package's static folder is quiet", [m for m in heard if "'pkgstatic'" in m], [])
 
+heard.clear()
+Widget("heavy", body='<div id="app"></div>', modules=['const pad = "' + "x" * 300_000 + '";'])
+said = " ".join(m for m in heard if "'heavy'" in m)
+check("a page big enough to be felt is warned about, with its size",
+      ("KB" in said, "per connector" in said, "largest script" in said), (True, True, True))
+heard.clear()
+Widget("light", body="<p>x</p>", modules=["window.app = 1;"])
+check("... and an ordinary page is not", [m for m in heard if "'light'" in m], [])
+
 # the second-client warning reads scripts, not prose
 heard.clear()
 Widget("prose", body="<p>The client sends <code>ui/notifications/initialized</code>.</p>")
