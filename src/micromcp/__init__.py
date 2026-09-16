@@ -39,7 +39,7 @@ from .registry import MCP, _coerce  # noqa: F401
 from .schema import _check  # noqa: F401
 from .wsgi import Server, _Loop  # noqa: F401
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "MCP", "Server", "ASGIServer", "Context", "Principal", "Error", "Unauthorized",

@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-09-16 (tagged; not yet on PyPI)
+
+MCP Apps widgets, an OAuth token-validation helper, and the core fixes that
+building them turned up. The core API is unchanged apart from a trimmed
+`__all__`; everything new sits beside it. `micromcp.apps` is **experimental**
+and may change in a minor release.
 
 ### Core
 - Requests carrying `NaN`, `Infinity`, or a number that overflows to

@@ -59,7 +59,7 @@ Changelog = "https://github.com/mhalle/micromcp/blob/main/CHANGELOG.md"
 path = "src/micromcp/__init__.py"
 
 [tool.hatch.build.targets.sdist]
-include = ["src/micromcp", "tests", "tools", "docs", ".github", "README.md", "CHANGELOG.md", "SECURITY.md", "LICENSE", "NOTICE"]
+include = ["src/micromcp", "tests", "tools", "docs", "examples", ".github", "README.md", "CHANGELOG.md", "SECURITY.md", "LICENSE", "NOTICE"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/micromcp"]
