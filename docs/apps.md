@@ -40,7 +40,7 @@ board = Widget("todos", title="Todos", scripts=[Path("htmx.min.js")], body="""
 def show_todos() -> str:
     return f"{todos.open_count()} open todos"
 
-@mcp.tool(visibility="app")               # the widget calls this; the model never sees it
+@mcp.tool(visibility="app")               # hidden from the model; the widget still calls it
 def todo_list():
     return fragment(render(todos))        # HTML for the widget: a str or components
 ```
@@ -84,7 +84,9 @@ chart = Widget("chart", body='<div id="root"></div>', csp={
 
 The keys are `connectDomains`, `resourceDomains`, `frameDomains`, and
 `baseUriDomains`; any other key is refused, and an entry carrying a path, a
-bare host, or credentials is refused. A complete `html=` page needs this:
+bare host, or credentials is refused — declare a tile server or an API by its
+origin (`https://tile.openstreetmap.org`), never by the URL template your
+code builds from it. A complete `html=` page needs this:
 micromcp declares origins for the https URLs you hand to `scripts=`,
 `modules=`, `styles=`, and `imports=`, but it does not go looking through a
 page you built yourself, so anything that page loads from a CDN must be
@@ -95,7 +97,12 @@ as in the dev host. `imports=` writes an import map, so modules can
 `import ... from "three"` (its origins are declared the same way; see
 `examples/mcp_app_3d.py`, a three.js scene the model builds with tools and the
 user selects in). `csp=` adds origins, `border=` sets `prefersBorder`,
-`route=` and `fetch=` are covered below. A widget's resource is `ui://<name>`
+`route=` and `fetch=` are covered below. A tool with no `visibility=` is
+callable by both the model and the widget, which is the spec's default;
+`visibility="app"` only hides it from the model, and only because the host
+does so. Any other MCP client still lists and calls it, so guard what it
+does, exactly as you would an ordinary tool. A widget's resource is
+`ui://<name>`
 unless `uri=` says otherwise, and the name takes letters, digits, `.`, `_`,
 and `-`; two widgets cannot share a URI on one server.
 
@@ -174,7 +181,7 @@ export default defineConfig({
     rollupOptions: {
       input: "src/main.ts",           // no index.html: micromcp writes the page
       output: {
-        codeSplitting: false,         // one file (Vite 8+; before it, inlineDynamicImports)
+        codeSplitting: false,         // one file (Vite 8+ also spells it rolldownOptions)
         entryFileNames: "widget.js",
         assetFileNames: "widget.[ext]",
       },
@@ -267,7 +274,10 @@ rather than 215 KB).
 mcp.ready`. The bridge also dispatches an `mcp:ready` DOM event when the
 handshake completes, which is what `hx-trigger="mcp:ready"` fires on in the
 hypermedia examples. Then `mcp.callTool(name, args?)` resolves to `{content,
-structuredContent, isError}`, `mcp.setContext(text, data?)` tells the model
+structuredContent, isError}` — a tool that ran and failed resolves with
+`isError: true`, while a call that could not be made at all (no such tool,
+arguments the schema refuses, a timeout) **rejects**, so catch it or a stray
+argument becomes an unhandled rejection, `mcp.setContext(text, data?)` tells the model
 what the user sees, `mcp.say(text)` posts as the user, `mcp.channel(name)`
 opens a channel, and `mcp.fetch(url, init?)` routes a request through the
 host. A widget built from `body=` always has the bridge; a complete `html=`
@@ -382,6 +392,13 @@ A widget can be a static page whose HTML the server renders: every click
 becomes a `tools/call` the host proxies to this server, and the tool answers
 with an HTML fragment that is swapped in. The widget has no app logic and no
 network access; all state stays on the server.
+
+Two things a sandboxed frame will not do, whatever your toolkit. A `<form>`
+cannot submit — the frame has no `allow-forms`, so the browser blocks it
+before htmx sees a `submit` event: put `hx-post` on the button and name the
+fields with `hx-include="#new-card"`. And an `hx-trigger` filter such as
+`keyup[key=='Enter']` is evaluated as JavaScript, which the default policy
+refuses; bind the key yourself in a small script and click the button.
 
 ```python
 @mcp.tool(visibility="app")                     # hidden from the model, callable by the widget
@@ -533,6 +550,21 @@ library whose Python transport interface maps onto a channel and whose
 TypeScript client takes `mcp.WebSocket` unchanged; the same pattern drives
 `examples/mcp_app_3d.py`.
 
+Pushing HTML into a hypermedia widget takes one more step than assigning
+`innerHTML`, which would leave the new markup unwired: hand it to the toolkit
+instead, `htmx.swap({text: msg.html, target: "#board", swap: "innerMorph"})`,
+so the `hx-*` attributes in it are picked up. If the action that broadcast
+also returned a fragment, the widget swaps twice; either let the broadcast do
+the work and answer the tool with an empty fragment, or tag the payload with
+the sender so a page can skip its own.
+
+Two practical notes. A context update is debounced, and that includes one a
+tool sent with `fragment(context=...)`, so two updates in the same instant
+coalesce into the last: send snapshots, not deltas. And a widget holding a
+channel open is never "network idle" — the receive call is a long poll — so a
+browser automation that waits for idle will time out; wait for an element
+instead.
+
 ## The dev host
 
 `DEVHOST_HTML` is a stand-in MCP Apps host for development: it reads a tool's
@@ -586,6 +618,10 @@ class Threaded(ThreadingMixIn, WSGIServer):             # the host calls concurr
 make_server("127.0.0.1", PORT, app, server_class=Threaded).serve_forever()
 ```
 
+With a channel, prefer `ASGIServer` and an ASGI server such as uvicorn; the
+dev-host branch is then a `scope`/`send` pair that writes `DEVHOST_HTML`
+before delegating the rest to the endpoint.
+
 Then open `http://127.0.0.1:8770/devhost?mcp=/mcp`. Two details cost more
 time than anything else in this page if you miss them: the dev host is a
 browser client, so its origin must be in `allowed_origins=` or every call
@@ -597,6 +633,34 @@ widget's own scripts are inline), `eval` does not, and `font-src` and
 `connect-src` list only declared origins. So something that works here can
 still fail under a stricter host, and `?csp=eval` shows what Claude's more
 permissive policy allows.
+
+To drive the same server from a script — to seed state, or to act as the
+model does while a widget is open — a stateless call carries its version in
+`_meta` and repeats the method and name in headers:
+
+```python
+import json, urllib.request
+
+VER = "2026-07-28"
+
+def call(method, params, endpoint="http://127.0.0.1:8770/mcp"):
+    body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": dict(params)}
+    body["params"].setdefault("_meta", {}).update({
+        "io.modelcontextprotocol/protocolVersion": VER,
+        "io.modelcontextprotocol/clientCapabilities": {},
+    })
+    req = urllib.request.Request(endpoint, json.dumps(body).encode(), {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "MCP-Protocol-Version": VER,
+        "Mcp-Method": method,                                  # headers match the body
+        "Mcp-Name": params.get("name") or params.get("uri") or "",
+    })
+    with urllib.request.urlopen(req) as r:
+        return json.loads(r.read())
+
+call("tools/call", {"name": "roll", "arguments": {"sides": 20}})
+```
 
 The dev host has no controls. It loads the first tool that shows a widget and
 is visible to the model; `?tool=<name>` picks another, `?args=<json>` passes

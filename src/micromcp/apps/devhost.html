@@ -92,8 +92,10 @@ window.addEventListener("message", async ev => {
       return;
     }
     case "tools/call": {
-      const t = tools[m.params && m.params.name];
-      if (!t || !vis(t).includes("app")) return reply(null, {code: -32602, message: "tool not callable by apps"});
+      const name = m.params && m.params.name;
+      const t = tools[name];
+      if (!t) return reply(null, {code: -32601, message: "no such tool '" + name + "'"});
+      if (!vis(t).includes("app")) return reply(null, {code: -32602, message: "tool '" + name + "' is not callable by apps (visibility=" + vis(t).join("+") + ")"});
       try { return reply(await rpc("tools/call", m.params, t.name)); }
       catch (e) { return reply(null, e.rpc || {code: -32603, message: String(e)}); }
     }

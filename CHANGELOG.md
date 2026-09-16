@@ -110,6 +110,23 @@
   inlined as `data:` URLs are blocked by the default policy's `font-src`, so
   a vendored stylesheet belongs on its CDN, and Leaflet needs
   `L.Icon.Default.imagePath = ""` before its icons are pointed at data URLs.
+- Three example apps were built against the docs — a charts dashboard, a
+  Leaflet map, and a server-rendered kanban board — and fixed what they hit.
+  `mcp.callTool` forwards a `fragment(context=...)` update, which until now
+  reached the model only when the widget went through `mcp.fetch`, so a
+  bundled app got nothing. The dev host names a tool it cannot find instead
+  of blaming `visibility=`. A word ending in `.js` is no longer read as a
+  path (ECharts' `"Node.js"` drew a warning), and the paths in a warning are
+  quoted, so a list of them reads as a list. `docs/apps.md` gains what the
+  three apps had to discover for themselves: that `callTool` rejects when the
+  call cannot be made and resolves with `isError` when the tool ran and
+  failed, that a tool with no `visibility=` is callable by the widget too and
+  that hiding one from the model is the host's doing rather than the wire's,
+  that `csp=` takes an origin and never a URL template, that a sandboxed
+  frame will not submit a `<form>` or evaluate an `hx-trigger` filter, how to
+  swap pushed HTML so its `hx-*` attributes stay wired, that context updates
+  from either path share one debounce, that a widget holding a channel is
+  never "network idle", and how to call your own server from a script.
 - A second pass of the same exercise, against the revised page: a font
   inlined as a `data:` URL is warned about (a host's `font-src` refuses it,
   which the docs knew and the library did not check), a run-time `import()`
