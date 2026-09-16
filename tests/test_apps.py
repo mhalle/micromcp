@@ -710,12 +710,29 @@ check("page escapes the title", "<title>A &amp; B</title>" in doc, True)
 check("page refuses a script that would close its tag",
       raises(lambda: page("", scripts=["x</SCRIPT >"])), "ValueError")
 # the bundled example: its committed build is what the docs' recipe produces
-EX = pathlib.Path(__file__).resolve().parent.parent / "examples" / "bundled_ui" / "dist"
+EXAMPLES = pathlib.Path(__file__).resolve().parent.parent / "examples"
 heard.clear()
 example = Widget("readings", title="Readings", body='<div class="wrap" id="root"></div>',
-                 modules=[EX / "widget.js"], styles=[EX / "widget.css"])
+                 modules=[EXAMPLES / "bundled_ui" / "dist" / "widget.js"],
+                 styles=[EXAMPLES / "bundled_ui" / "dist" / "widget.css"])
 check("examples/bundled_ui builds a widget with nothing left behind",
       ([m for m in heard if "'readings'" in m], example.html.count("data:image/png")), ([], 2))
+
+# every example builds its widgets, and none of them warns
+import importlib.util  # noqa: E402
+
+sys.path.insert(0, str(EXAMPLES))
+for path in sorted(EXAMPLES.glob("*.py")):
+    heard.clear()
+    spec = importlib.util.spec_from_file_location(f"example_{path.stem}", path)
+    try:
+        spec.loader.exec_module(importlib.util.module_from_spec(spec))
+        outcome = [m for m in heard if "widget" in m]
+    except ImportError as e:                      # an example whose optional dep is absent
+        outcome = f"skip ({e.name} not installed)"
+    check(f"examples/{path.name} builds cleanly", outcome,
+          [] if isinstance(outcome, list) else outcome)
+sys.path.pop(0)
 
 check("a tool result's context reaches the model on both call paths",
       BRIDGE_JS.count("pushContext(") >= 3, True)
