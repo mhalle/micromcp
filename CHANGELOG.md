@@ -110,6 +110,14 @@
   inlined as `data:` URLs are blocked by the default policy's `font-src`, so
   a vendored stylesheet belongs on its CDN, and Leaflet needs
   `L.Icon.Default.imagePath = ""` before its icons are pointed at data URLs.
+- A second pass of the same exercise, against the revised page: a font
+  inlined as a `data:` URL is warned about (a host's `font-src` refuses it,
+  which the docs knew and the library did not check), a run-time `import()`
+  is told apart from an asset string so each carries its own remedy, an asset
+  path without a leading `./` is seen, another vendor's MCP Apps client is
+  recognised so its page is not told to add a second bridge, a build folder
+  beside a server module is scanned again, and a refused relative URL names
+  the remedy that fits: a split build, a vendored stylesheet, or an asset.
 - A widget whose page carries no MCP Apps client at all is now warned about,
   since `window.mcp` would be undefined; a bundler's leftovers are also
   recognised when the hash holds no digit (Vite 8 writes `lazy-DuOUKcfe.js`)

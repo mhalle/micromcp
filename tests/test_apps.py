@@ -305,8 +305,12 @@ class Heard(logging.Handler):
 logging.getLogger("micromcp.apps").addHandler(Heard())
 Widget("warned", body="<p>x</p>",
        modules=['const logo = "./logo.svg"; await import("./chunk-a1.js");'])
+said = " ".join(m for m in heard if "'warned'" in m)
 check("relative paths inside a script are logged, not refused",
-      [("./logo.svg" in m, "./chunk-a1.js" in m) for m in heard if "'warned'" in m], [(True, True)])
+      ("./logo.svg" in said, "./chunk-a1.js" in said), (True, True))
+check("... an asset and a run-time import are told apart",
+      [("imports" in m, "refers to" in m) for m in heard if "'warned'" in m],
+      [(True, False), (False, True)])
 check("an inlined script with </script is refused by default",
       raises(lambda: Widget("s", body="<p>x</p>", modules=['window.t = "</SCRIPT>";'])),
       "ValueError")
@@ -431,6 +435,46 @@ check("passing neither body= nor html= says so",
       "neither" in message(lambda: Widget("none", modules=["window.a = 1"])), True)
 check("passing both says so",
       "both" in message(lambda: Widget("two", body="<p>x</p>", html="<html></html>")), True)
+for label, doc in [
+        ("a bundled ext-apps client",
+         '<html><head></head><body><script>const c = require("@modelcontextprotocol/ext-apps");'
+         '</script></body></html>'),
+        ("a client that installs the global",
+         '<html><head></head><body><script>window.mcp = makeClient();</script></body></html>'),
+        ("a client that speaks the handshake",
+         '<html><head></head><body><script>post("ui/initialize", {});</script></body></html>')]:
+    heard.clear()
+    Widget("client2", html=doc)
+    check(f"no-client warning stays quiet for {label}",
+          [m for m in heard if "'client2'" in m], [])
+heard.clear()
+Widget("barepath", body="<p>x</p>", scripts=['var p = "img/logo.png";'])
+check("an asset path without ./ is warned about too",
+      any("img/logo.png" in m for m in heard if "'barepath'" in m), True)
+heard.clear()
+Widget("mediatype", body="<p>x</p>", scripts=['var t = "image/png", u = "application/json";'])
+check("... but a media type is not a path", [m for m in heard if "'mediatype'" in m], [])
+beside = pathlib.Path(tempfile.mkdtemp())
+(beside / "server.py").write_text("")           # the ordinary layout: dist beside the server
+(beside / "dist").mkdir()
+(beside / "dist" / "widget.js").write_text("window.w = 1")
+(beside / "dist" / "chunk-A1b2C3d4.js").write_text("x")
+heard.clear()
+Widget("beside", body="<p>x</p>", modules=[beside / "dist" / "widget.js"])
+check("a build folder beside the server module is still scanned",
+      any("chunk-A1b2C3d4.js" in m for m in heard if "'beside'" in m), True)
+check("a split build is told to rebuild as one file",
+      "one file" in message(lambda: Widget(
+          "stub", html='<html><head><link rel=stylesheet href="./index-5yxhrva4.css">'
+                       '</head><body></body></html>')), True)
+heard.clear()
+Widget("webfont", body="<p>x</p>",
+       styles=['@font-face{font-family:K;src:url(data:font/woff2;base64,AA) format("woff2")}'])
+check("a font inlined as a data: URL is warned about",
+      any("font-src" in m for m in heard if "'webfont'" in m), True)
+heard.clear()
+Widget("inlineimg", body="<p>x</p>", styles=['p{background:url(data:image/png;base64,AA)}'])
+check("... but an inlined image is not", [m for m in heard if "'inlineimg'" in m], [])
 vendored_css = pathlib.Path(tempfile.mkdtemp()) / "katex.min.css"
 vendored_css.write_text('@font-face{src:url(fonts/KaTeX.woff2)}')
 check("a vendored stylesheet is pointed at its CDN, not at a Path",
