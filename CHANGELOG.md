@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Core
+- `MCP(name, version, instructions="...")` publishes server instructions:
+  in the `server/discover` result, and in `initialize` under
+  `legacy="stateless"`. Omitted when unset; a non-string is a `TypeError` at
+  construction.
+
 ## 0.2.0 — 2026-09-16 (tagged; not yet on PyPI)
 
 MCP Apps widgets, an OAuth token-validation helper, and the core fixes that
