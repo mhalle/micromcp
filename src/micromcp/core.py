@@ -30,7 +30,7 @@ from ._constants import (
 )
 from .errors import Error, Unauthorized, _Reply, _err
 from .markers import Context
-from .registry import MCP, _allowed, _coerce, _is_async, _meta_ok
+from .registry import MCP, _allowed, _annotations_ok, _coerce, _is_async, _meta_ok
 from .schema import _check, _from_json
 
 _SENTINEL_RE = re.compile(r"^=\?base64\?(.*)\?=$")
@@ -107,10 +107,12 @@ MCP_APP_MIME = "text/html;profile=mcp-app"
 
 
 def embedded_resource(uri: str, *, mime_type: str = MCP_APP_MIME, text: str | None = None,
-                      blob: bytes | None = None, meta: dict | None = None) -> dict:
+                      blob: bytes | None = None, meta: dict | None = None,
+                      annotations: dict | None = None) -> dict:
     """An embedded-resource content block, the shape MCP-UI hosts render: pass
     it to `result(content=[...])` from a tool handler. Exactly one of `text`
-    (a str) or `blob` (bytes, sent base64) is required.
+    (a str) or `blob` (bytes, sent base64) is required. `meta` goes on the
+    embedded resource; `annotations` on the block.
     """
     if (text is None) == (blob is None):
         raise TypeError("embedded_resource: give exactly one of text= or blob=")
@@ -126,7 +128,64 @@ def embedded_resource(uri: str, *, mime_type: str = MCP_APP_MIME, text: str | No
     if meta:
         _meta_ok(meta, "embedded resource")
         res["_meta"] = copy.deepcopy(meta)
-    return {"type": "resource", "resource": res}
+    return _annotated({"type": "resource", "resource": res}, annotations, "embedded_resource")
+
+
+def _annotated(block: dict, annotations, what: str) -> dict:
+    if annotations is not None:
+        block["annotations"] = _annotations_ok(annotations, what)
+    return block
+
+
+def text_content(text: str, *, annotations: dict | None = None) -> dict:
+    """A text content block for `result(content=[...])`."""
+    if not isinstance(text, str):
+        raise TypeError("text_content: text must be a str")
+    return _annotated({"type": "text", "text": text}, annotations, "text_content")
+
+
+def _media(kind: str, data, mime_type, annotations) -> dict:
+    what = f"{kind}_content"
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        raise TypeError(f"{what}: data must be the raw bytes (they are base64-encoded for you)")
+    if not isinstance(mime_type, str) or not mime_type.startswith(f"{kind}/"):
+        raise ValueError(f"{what}: mime_type must be a {kind}/* type, e.g. "
+                         + ("'image/png'" if kind == "image" else "'audio/wav'"))
+    block = {"type": kind, "data": base64.b64encode(data).decode(), "mimeType": mime_type}
+    return _annotated(block, annotations, what)
+
+
+def image_content(data: bytes, mime_type: str, *, annotations: dict | None = None) -> dict:
+    """An image content block from raw bytes, e.g.
+    `result([image_content(png, "image/png")])`."""
+    return _media("image", data, mime_type, annotations)
+
+
+def audio_content(data: bytes, mime_type: str, *, annotations: dict | None = None) -> dict:
+    """An audio content block from raw bytes, e.g.
+    `result([audio_content(wav, "audio/wav")])`."""
+    return _media("audio", data, mime_type, annotations)
+
+
+def resource_link(uri: str, name: str, *, title: str | None = None,
+                  description: str | None = None, mime_type: str | None = None,
+                  size: int | None = None, annotations: dict | None = None) -> dict:
+    """A resource-link content block: points at a resource the client can
+    read (or not) instead of inlining it in the result."""
+    for field, v in (("uri", uri), ("name", name)):
+        if not isinstance(v, str) or not v:
+            raise TypeError(f"resource_link: {field} must be a non-empty str")
+    block = {"type": "resource_link", "uri": uri, "name": name}
+    for key, v in (("title", title), ("description", description), ("mimeType", mime_type)):
+        if v is not None:
+            if not isinstance(v, str):
+                raise TypeError(f"resource_link: {key} must be a str")
+            block[key] = v
+    if size is not None:
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            raise TypeError("resource_link: size must be a non-negative int (bytes)")
+        block["size"] = size
+    return _annotated(block, annotations, "resource_link")
 
 
 class Result(dict):
@@ -168,12 +227,22 @@ def _check_result(r: dict) -> str | None:
                 return f"content[{i}] ({b['type']}) is missing {f!r}"
         if b["type"] == "text" and not isinstance(b["text"], str):
             return f"content[{i}] text must be a str"
+        if b["type"] in ("image", "audio", "resource_link"):
+            for f in _BLOCK_FIELDS[b["type"]]:
+                if not isinstance(b[f], str):
+                    return f"content[{i}] ({b['type']}) {f} must be a str" + (
+                        f"; use {b['type']}_content() to encode bytes" if f == "data" else "")
         if b["type"] == "resource":
             res = b["resource"]
             if not isinstance(res, dict) or not isinstance(res.get("uri"), str):
                 return f"content[{i}] resource needs a uri"
             if (isinstance(res.get("text"), str)) == (isinstance(res.get("blob"), str)):
                 return f"content[{i}] resource needs exactly one of text/blob as a str"
+        if "annotations" in b:
+            try:
+                b["annotations"] = _annotations_ok(b["annotations"], f"content[{i}]")
+            except ValueError as exc:
+                return str(exc)
     if "isError" in r and not isinstance(r["isError"], bool):
         return "isError must be a bool"
     if "structuredContent" in r and not isinstance(r["structuredContent"], dict):
@@ -188,10 +257,16 @@ def _check_result(r: dict) -> str | None:
 
 def _as_content(value) -> dict:
     if isinstance(value, Result):
+        value = copy.deepcopy(dict(value))     # checked as a copy: annotations are normalized
         problem = _check_result(value)
         if problem:
             raise ValueError(f"handler returned a malformed result: {problem}")
-        return copy.deepcopy(dict(value))
+        return value
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        # str() would send the Python repr as text. The MIME type is unknown,
+        # so the handler has to say what the bytes are.
+        raise ValueError("tool returned raw bytes; return result([image_content(data, "
+                         "mime_type)]) (or audio_content / embedded_resource(blob=...))")
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         value = dataclasses.asdict(value)
     elif callable(getattr(value, "model_dump", None)):      # pydantic, no import

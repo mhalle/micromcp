@@ -30,7 +30,8 @@ from ._constants import (  # noqa: F401
 )
 from .asgi import ASGIServer
 from .core import (  # noqa: F401
-    MCP_APP_MIME, Result, _Core, _Pool, _decode_hdr, _encode, embedded_resource, result,
+    MCP_APP_MIME, Result, _Core, _Pool, _decode_hdr, _encode, audio_content, embedded_resource,
+    image_content, resource_link, result, text_content,
 )
 from .docstrings import _parse_doc  # noqa: F401
 from .errors import Error, Unauthorized
@@ -43,7 +44,8 @@ __version__ = "0.2.0"
 
 __all__ = [
     "MCP", "Server", "ASGIServer", "Context", "Principal", "Error", "Unauthorized",
-    "result", "Result", "embedded_resource", "MCP_APP_MIME",
+    "result", "Result", "text_content", "image_content", "audio_content", "resource_link",
+    "embedded_resource", "MCP_APP_MIME",
     "django_view", "django_async_view", "__version__",
 ]
 
