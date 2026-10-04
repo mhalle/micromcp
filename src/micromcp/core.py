@@ -694,9 +694,12 @@ class _Core:
         if method == "ping":
             return {}
         pv = params.get("protocolVersion")
-        return {"protocolVersion": pv if pv in LEGACY_VERSIONS else LEGACY_VERSIONS[0],
-                "capabilities": self._capabilities(),
-                "serverInfo": {"name": self.mcp.name, "version": self.mcp.version}}
+        out = {"protocolVersion": pv if pv in LEGACY_VERSIONS else LEGACY_VERSIONS[0],
+               "capabilities": self._capabilities(),
+               "serverInfo": {"name": self.mcp.name, "version": self.mcp.version}}
+        if self.mcp.instructions:
+            out["instructions"] = self.mcp.instructions
+        return out
 
     async def _bind_call(self, params, principal, big):
         """Validate and convert a tools/call's arguments before any response
@@ -766,8 +769,11 @@ class _Core:
         if method == "server/discover":
             # Era negotiation. A modern client probes this FIRST; answering it
             # is what stops the client falling back to the legacy handshake.
-            return {"supportedVersions": self._supported(),
-                    "capabilities": self._capabilities()}
+            out = {"supportedVersions": self._supported(),
+                   "capabilities": self._capabilities()}
+            if m.instructions:
+                out["instructions"] = m.instructions
+            return out
         if method == "tools/list":
             return {"tools": public(m.tools.values())}
         if method == "resources/list":

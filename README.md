@@ -109,6 +109,20 @@ Prompt arguments arrive as strings and are coerced to the handler's `int`,
 `float`, or `bool` hints; `Principal` and `Context` parameters are injected
 exactly as for tools, and docstring `Args:` become argument descriptions.
 
+## Server instructions
+
+```python
+mcp = MCP("newton-civic", "1.0.0",
+          instructions="Look up a street with find_street before asking for its crashes.")
+```
+
+Guidance for the model on using the server as a whole; clients may put it in
+a system prompt. It goes out in the `server/discover` result, and in the
+`initialize` result for 2025-era clients under `legacy="stateless"`. Keep it to
+what tool descriptions can't say on their own, such as how the tools fit
+together. It is one string for every caller: discover is answered before any
+tool is called and may be cached by the client.
+
 ## UI apps (MCP Apps / MCP-UI)
 
 A widget is a static HTML page the host renders in a sandboxed iframe next to

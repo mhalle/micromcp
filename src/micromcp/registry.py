@@ -148,10 +148,19 @@ def _wire_name(kind, explicit, f, registry, replace) -> str:
 
 
 class MCP:
-    """A registry of tools, resources, and prompts. Hand it to a transport."""
+    """A registry of tools, resources, and prompts. Hand it to a transport.
 
-    def __init__(self, name: str, version: str = "0.1.0"):
+    instructions  natural-language guidance for the model on using this server
+                  as a whole (clients may put it in a system prompt). Sent in
+                  `server/discover`, and in `initialize` under legacy serving.
+                  Say what tool descriptions cannot: how the tools fit together.
+    """
+
+    def __init__(self, name: str, version: str = "0.1.0", *, instructions: str | None = None):
+        if instructions is not None and not isinstance(instructions, str):
+            raise TypeError("instructions must be a string")
         self.name, self.version = name, version
+        self.instructions = instructions
         self.tools: dict[str, dict] = {}
         self.resources: dict[str, dict] = {}
         self.templates: dict[str, dict] = {}

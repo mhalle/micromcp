@@ -466,9 +466,46 @@ async def oauth_asgi_section():
     srv.should_exit = True
 
 
+def instructions_section():
+    print("\n— server instructions in both eras —")
+    CI = {"capabilities": {}, "clientInfo": {"name": "old", "version": "1"}}
+    text = "Call add before crunch; results are in base 10."
+    mcp = build(); mcp.instructions = text
+    for label, app in (("modern-only", Server(mcp)), ("legacy", Server(mcp, legacy="stateless"))):
+        s, j, _ = wsgi(app, *modern("server/discover"))
+        check(f"{label}: discover carries instructions", (s, j["result"].get("instructions")), (200, text))
+    try:
+        from mcp_types._v2026_07_28 import DiscoverResult
+        check("SDK DiscoverResult reads them", DiscoverResult.model_validate(j["result"]).instructions, text)
+    except ImportError:
+        print("  skip  (mcp_types not installed)")
+    s, j, _ = wsgi(app, rpc("initialize", {"protocolVersion": "2025-11-25", **CI}))
+    check("legacy initialize carries instructions", (s, j["result"].get("instructions")), (200, text))
+    try:
+        from mcp_types._v2025_11_25 import InitializeResult
+        check("SDK InitializeResult reads them", InitializeResult.model_validate(j["result"]).instructions, text)
+    except ImportError:
+        print("  skip  (mcp_types not installed)")
+    s, j, _ = wsgi(app, rpc("tools/list"), {"MCP-Protocol-Version": "2025-11-25"})
+    check("not repeated on other results", "instructions" in j["result"], False)
+
+    app = Server(build(), legacy="stateless")
+    s, j, _ = wsgi(app, *modern("server/discover"))
+    check("unset: absent from discover", "instructions" in j["result"], False)
+    s, j, _ = wsgi(app, rpc("initialize", {"protocolVersion": "2025-11-25", **CI}))
+    check("unset: absent from initialize", "instructions" in j["result"], False)
+    check("set via the constructor", MCP("x", instructions=text).instructions, text)
+    try:
+        MCP("x", instructions=["not", "text"]); bad = False
+    except TypeError:
+        bad = True
+    check("non-string instructions rejected at construction", bad, True)
+
+
 async def main():
     strict_section()
     legacy_wsgi_section()
+    instructions_section()
     await legacy_asgi_section()
     oauth_wsgi_section()
     await oauth_asgi_section()
