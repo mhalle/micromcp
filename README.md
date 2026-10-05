@@ -83,6 +83,37 @@ unless you pass `replace=True`, a name outside `[A-Za-z0-9_-]{1,64}` (the
 grammar LLM tool-calling APIs enforce) raises, positional-only parameters
 raise, and `*args`/`**kwargs` are left out of the schema.
 
+### Images and other content
+
+A tool that returns anything other than JSON-able data builds its content
+blocks with `result()` and the helpers named after the spec's block types:
+
+```python
+from micromcp import result, image_content, text_content, resource_link
+
+@mcp.tool
+def crash_map(street: str) -> dict:
+    """Map of crashes on a street."""
+    png = render_map(street)
+    return result([
+        image_content(png, "image/png", annotations={"audience": ["user"]}),
+        text_content(f"{street}: 11 crashes, mostly at the Elm St intersection",
+                     annotations={"audience": ["assistant"]}),
+        resource_link(f"crash://street/{street}", f"{street} crashes", mime_type="text/csv"),
+    ])
+```
+
+`image_content` and `audio_content` take raw bytes and base64-encode them;
+the MIME type must be `image/*` or `audio/*`. `resource_link` points at a
+resource instead of inlining it, and `embedded_resource` inlines one. A tool
+that returns bare `bytes` is an in-band `isError` naming these helpers, since
+the MIME type cannot be guessed. Every helper takes `annotations`, the spec's
+hints for the client: `audience` (`["user"]`, `["assistant"]`, or both),
+`priority` (0 to 1), and `lastModified` (ISO 8601, or a `datetime`). Hosts
+may ignore them. Unknown keys are refused, and hand-written blocks passed to
+`result()` get the same checks. The helpers also work inside prompt messages:
+`{"role": "user", "content": image_content(png, "image/png")}`.
+
 ## Resources and prompts
 
 ```python
@@ -103,7 +134,9 @@ be plain identifiers — RFC 6570 operators (`{?q}`, `{+path}`) and duplicate
 names are rejected at registration — and matching is linear in the URI length.
 `int` and `bool` parameters are coerced strictly (`+12`, ` 12 `, `banana` are
 `-32602`, not silently `12` or `False`). A handler returning `bytes` is
-delivered as a base64 `blob`.
+delivered as a base64 `blob`. `annotations=` on `@mcp.resource` (audience,
+priority, lastModified) is published in `resources/list` and
+`resources/templates/list`.
 
 Prompt arguments arrive as strings and are coerced to the handler's `int`,
 `float`, or `bool` hints; `Principal` and `Context` parameters are injected
@@ -145,8 +178,8 @@ def crash_widget() -> str:
 def show_crashes(street: str) -> dict:
     by_year = lookup(street)
     if by_year is None:
-        return result([{"type": "text", "text": f"no data for {street}"}], is_error=True)
-    return result([{"type": "text", "text": f"Crashes on {street}"}],
+        return result([text_content(f"no data for {street}")], is_error=True)
+    return result([text_content(f"Crashes on {street}")],
                   structured={"street": street, "by_year": by_year})
 ```
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import inspect
 import json
 import re
@@ -35,6 +36,45 @@ def _meta_ok(meta, what: str) -> dict:
         return json.loads(json.dumps(meta, allow_nan=False))
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{what} meta is not JSON-serializable: {exc}") from None
+
+
+_AUDIENCE = ("user", "assistant")
+
+
+def _annotations_ok(ann, what: str) -> dict:
+    """Validate content/resource `annotations` (audience, priority,
+    lastModified) and return a detached copy. Unknown keys are refused, so a
+    misspelled one fails here instead of being silently ignored by hosts. A
+    `datetime` lastModified is rendered as ISO 8601."""
+    if not isinstance(ann, dict):
+        raise ValueError(f"{what} annotations must be a dict")
+    unknown = sorted(str(k) for k in ann if k not in ("audience", "priority", "lastModified"))
+    if unknown:
+        raise ValueError(f"{what} annotations: unknown key(s) {unknown} "
+                         f"(expected audience, priority, lastModified)")
+    out = {}
+    if "audience" in ann:
+        aud = ann["audience"]
+        if not isinstance(aud, (list, tuple)) or not all(a in _AUDIENCE for a in aud):
+            raise ValueError(f"{what} annotations: audience must be a list of "
+                             f"'user' and/or 'assistant', e.g. ['user']")
+        out["audience"] = list(aud)
+    if "priority" in ann:
+        p = ann["priority"]
+        if isinstance(p, bool) or not isinstance(p, (int, float)) or not 0 <= p <= 1:
+            raise ValueError(f"{what} annotations: priority must be a number from 0 to 1")
+        out["priority"] = p
+    if "lastModified" in ann:
+        lm = ann["lastModified"]
+        if isinstance(lm, datetime.datetime):
+            lm = lm.isoformat()
+        try:
+            datetime.datetime.fromisoformat(lm)
+        except (TypeError, ValueError):
+            raise ValueError(f"{what} annotations: lastModified must be an ISO 8601 "
+                             f"string or a datetime") from None
+        out["lastModified"] = lm
+    return out
 
 
 _TEMPLATE_RE = re.compile(r"\{([^{}]*)\}")
@@ -233,7 +273,7 @@ class MCP:
         return wrap(fn) if fn else wrap
 
     def resource(self, uri: str, *, mime_type=None, title=None, guards=(),
-                 replace=False, meta=None):
+                 replace=False, meta=None, annotations=None):
         """Register a resource. A `{braced}` segment makes it a template:
 
             @mcp.resource("crash://{crash_id}")
@@ -246,6 +286,8 @@ class MCP:
         evaluated on read and on listing, before any parameter is parsed; a
         denied resource is indistinguishable from a missing one. `meta` is
         published as `_meta` in listings and on the read contents.
+        `annotations` (audience, priority, lastModified) are published in
+        listings.
 
         `mime_type` defaults to `text/plain`, or to `text/html;profile=mcp-app`
         for a `ui://` URI (an MCP App widget). Widgets are fetched by the host
@@ -271,6 +313,8 @@ class MCP:
                 entry["title"] = title
             if meta:
                 entry["_meta_out"] = _meta_ok(meta, f"resource {uri!r}")
+            if annotations is not None:
+                entry["annotations"] = _annotations_ok(annotations, f"resource {uri!r}")
             registry = self.templates if rx is not None else self.resources
             if uri in registry and not replace:
                 raise ValueError(f"resource {uri!r} is already registered (pass replace=True)")

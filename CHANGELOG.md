@@ -7,6 +7,18 @@
   in the `server/discover` result, and in `initialize` under
   `legacy="stateless"`. Omitted when unset; a non-string is a `TypeError` at
   construction.
+- Content-block helpers `text_content`, `image_content`, `audio_content`,
+  and `resource_link`, beside `embedded_resource`. The media helpers take
+  raw bytes and base64-encode them. All five take `annotations=`
+  (audience, priority, lastModified), which are validated: unknown keys,
+  out-of-range priority, and unparseable dates are refused.
+- `@mcp.resource(annotations=...)`, published in resource and template
+  listings.
+- A tool that returns bare `bytes` is now an in-band `isError` naming the
+  helpers. It used to send the bytes' Python repr as text.
+- `result()` checks hand-written blocks more closely: image/audio `data`
+  and `mimeType`, and resource-link `uri` and `name`, must be strings, and
+  any `annotations` get the same validation as the helpers'.
 
 ## 0.2.0 — 2026-09-16 (tagged; not yet on PyPI)
 
