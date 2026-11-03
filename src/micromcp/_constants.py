@@ -19,6 +19,12 @@ META_CLIENT = "io.modelcontextprotocol/clientInfo"
 # it mandated JSON-RPC batch arrays, which this server refuses.
 LEGACY_VERSIONS = ("2025-11-25", "2025-06-18")
 WELL_KNOWN = "/.well-known/oauth-protected-resource"   # RFC 9728
+# Skills over MCP: the extension identifier, the MIME type of a directory
+# resource, and the per-skill limits every conforming host accepts.
+SKILLS_EXT = "io.modelcontextprotocol/skills"
+DIRECTORY_MIME = "inode/directory"
+SKILL_MAX_FILES = 512
+SKILL_MAX_BYTES = 16 * 1024 * 1024
 
 # JSON-RPC / MCP error codes
 PARSE_ERROR = -32700

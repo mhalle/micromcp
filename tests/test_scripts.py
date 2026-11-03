@@ -23,6 +23,7 @@ SUITES = [
     ("ergonomics.py", ["unit"], 60),
     ("test_ui.py", ["unit"], 60),
     ("test_content.py", ["unit"], 60),
+    ("test_skills.py", ["unit"], 60),
     ("test_apps.py", ["unit"], 60),
     ("conform.py", ["conform"], 60),
     ("interop.py", ["interop", "server"], 120),

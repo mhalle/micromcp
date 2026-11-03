@@ -10,7 +10,11 @@ from mcp_types.methods import (validate_server_result, validate_client_request,
                                parse_server_notification)
 from micromcp import MCP, Server, PROTOCOL, META_VER, META_CAPS
 
-mcp = MCP("newton-crashes", "0.1.0")
+# A declared extension and a skill, so discover's capabilities.extensions and
+# the SKILL.md listing are checked against the strict schema too.
+mcp = MCP("newton-crashes", "0.1.0", extensions={"io.modelcontextprotocol/ui": {}})
+mcp.skill({"SKILL.md": "---\nname: crash-review\ndescription: Review a street's crashes\n---\n",
+           "references/fields.md": "street, year\n"})
 
 @mcp.tool
 def severity_breakdown(street: str | None = None) -> dict:
@@ -60,6 +64,7 @@ CASES = [
     ("resources/read", {"uri": "schema://crash"}),
     ("resources/templates/list", None),
     ("resources/read", {"uri": "crash://42"}),
+    ("resources/read", {"uri": "skill://crash-review/SKILL.md"}),
     ("prompts/list", None),
     ("prompts/get", {"name": "summarize", "arguments": {"topic": "traffic"}}),
 ]
