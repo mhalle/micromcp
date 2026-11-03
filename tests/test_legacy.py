@@ -179,16 +179,24 @@ def legacy_wsgi_section():
     s, j, _ = wsgi(app, rpc("tools/call", {"name": "add", "arguments": {"a": 2, "b": 3}}), V)
     check("tools/call served", j["result"].get("structuredContent"), {"sum": 5})
     s, j, h = wsgi(app, rpc("tools/call", {"name": "nope", "arguments": {}}), V)
-    check("unknown tool is -32601 under HTTP 200 for a 2025 client (404 reads as session gone)",
-          (s, j["error"]["code"]), (200, -32601))
+    check("unknown tool is 400/-32602 for a 2025 client, as 2025-11-25 also says",
+          (s, j["error"]["code"]), (400, -32602))
     check("legacy error reply names the era served", h.get("mcp-protocol-version"), "2025-11-25")
     s, j, h = wsgi(app, rpc("tools/call", {"name": "quiet", "arguments": {}}), V)
-    check("hidden tool answers exactly like an unknown one", (s, j["error"]["code"]), (200, -32601))
+    check("hidden tool answers exactly like an unknown one",
+          (s, j["error"]["code"], j["error"]["message"]), (400, -32602, "Unknown tool: quiet"))
+    s, j, h = wsgi(app, rpc("resources/read", {"uri": "schema://nope"}), V)
+    check("a missing resource is the 2025 era's -32002 for a 2025 client",
+          (s, j["error"]["code"], j["error"].get("data")), (400, -32002, {"uri": "schema://nope"}))
+    body, hdrs = modern("resources/read", {"uri": "schema://nope"}, name="schema://nope")
+    s, j, h = wsgi(app, body, hdrs)
+    check("... and -32602 for a modern one", (s, j["error"]["code"]), (400, -32602))
     s, j, h = wsgi(app, rpc("tools/call", {"name": "vault", "arguments": {}}), V)
     check("a guard that raises the challenge still gets its 401", (s, j["error"]["code"]), (401, -32001))
     body, hdrs = modern("tools/call", {"name": "nope", "arguments": {}}, name="nope")
     s, j, h = wsgi(app, body, hdrs)
-    check("modern unknown tool keeps 404", (s, j["error"]["code"], h.get("mcp-protocol-version")), (404, -32601, PROTOCOL))
+    check("modern unknown tool is 400/-32602", (s, j["error"]["code"], h.get("mcp-protocol-version")),
+          (400, -32602, PROTOCOL))
     s, j, _ = wsgi(app, rpc("tools/call", {"name": "add", "arguments": {"a": "x", "b": 3}}), V)
     check("argument validation still applies", (s, j["error"]["code"]), (400, -32602))
     s, j, _ = wsgi(app, rpc("resources/read", {"uri": "schema://demo"}), V)

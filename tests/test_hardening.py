@@ -240,12 +240,13 @@ def main():
           [1]["result"]["structuredContent"], {"principal": {"sub": "real"}})
 
     print("— C2 guards on resources, prompts, and listings —")
-    check("guarded resource, anonymous -> 404", err(rpc("resources/read", {"uri": "secret://vault"})), (404, -32601))
+    check("guarded resource, anonymous -> 400/-32602, as if missing",
+          err(rpc("resources/read", {"uri": "secret://vault"})), (400, -32602))
     check("guarded resource, principal -> 200",
           rpc("resources/read", {"uri": "secret://vault"}, auth_hdr="Bearer good")[1]["result"]["contents"][0]["text"],
           "TOP SECRET")
-    check("guarded prompt, anonymous -> 404",
-          err(rpc("prompts/get", {"name": "secret_prompt", "arguments": {"topic": "t"}})), (404, -32601))
+    check("guarded prompt, anonymous -> 400/-32602, as if unknown",
+          err(rpc("prompts/get", {"name": "secret_prompt", "arguments": {"topic": "t"}})), (400, -32602))
     check("guarded prompt hidden from anonymous prompts/list",
           [p["name"] for p in rpc("prompts/list")[1]["result"]["prompts"]], [])
     check("guarded resource hidden from anonymous resources/list",
@@ -326,7 +327,7 @@ def main():
     print("— H9 templates are linear; bad coercion is -32602 —")
     long_uri = "event://" + "-" * 400 + "/"
     t0 = time.time(); s, _ = rpc("resources/read", {"uri": long_uri}); dt = time.time() - t0
-    check("400-byte non-matching URI -> 404 fast", (s, dt < 0.5), (404, True))
+    check("400-byte non-matching URI -> not found, fast", (s, dt < 0.5), (400, True))
     check("crash://abc -> 400/-32602", err(rpc("resources/read", {"uri": "crash://abc"})), (400, -32602))
     check("crash://42 still works", json.loads(rpc("resources/read", {"uri": "crash://42"})[1]["result"]["contents"][0]["text"]), {"id": 42})
 
@@ -482,8 +483,8 @@ def medium():
     s, r = rpc("tools/list", raw=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}).encode())
     check("missing _meta -> -32602 naming both keys", (s, r["error"]["code"], META_VER in r["error"]["message"]),
           (400, -32602, True))
-    check("resources/read without uri -> 404, not a header complaint",
-          err(rpc("resources/read", {}, name=None)), (404, -32601))
+    check("resources/read without uri -> not found (-32602), not a header complaint",
+          err(rpc("resources/read", {}, name=None)), (400, -32602))
 
     print("— M10 Content-Type / CORS / Allow / Host —")
     check("Content-Type text/plain -> 400", err(rpc("tools/list", hdrs={"CONTENT-TYPE": "text/plain"})), (400, -32600))

@@ -111,7 +111,8 @@ check("raising tool -> message", r["result"]["content"][0]["text"],
 
 print("— auth guard —")
 s, r = post("tools/call", {"name": "protected", "arguments": {"x": 1}})
-check("guard hides the tool from an anonymous call (404/-32601)", (s, r["error"]["code"]), (404, -32601))
+check("guard hides the tool from an anonymous call (400/-32602, as if unknown)",
+      (s, r["error"]["code"], r["error"]["message"]), (400, -32602, "Unknown tool: protected"))
 s, r = post("tools/call", {"name": "protected", "arguments": {"x": 1}},
             hdrs={"Authorization": "Bearer good"})
 check("guard allows principal", r["result"]["structuredContent"], {"x": 1})
@@ -130,7 +131,8 @@ check("missing clientCapabilities -> -32602", (s, r["error"]["code"]), (400, -32
 s, r = post("nope/nope")
 check("unknown method -> 404/-32601", (s, r["error"]["code"]), (404, -32601))
 s, r = post("tools/call", {"name": "ghost"})
-check("unknown tool -> 404/-32601", (s, r["error"]["code"]), (404, -32601))
+check("unknown tool -> 400/-32602 (404/-32601 is for unknown methods)",
+      (s, r["error"]["code"], r["error"]["message"]), (400, -32602, "Unknown tool: ghost"))
 s, r = post("tools/list", hdrs={"Origin": "https://evil.example"})
 check("bad Origin -> 403", s, 403)
 s, r = post("tools/list", hdrs={"Origin": "https://ok.example"})

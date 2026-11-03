@@ -3,6 +3,16 @@
 ## Unreleased
 
 ### Core
+- **Behavior change:** an unknown or guard-hidden tool (`tools/call`), prompt
+  (`prompts/get`), or resource (`resources/read`) is answered `400` with
+  `-32602`, as 2026-07-28 specifies (`Unknown tool: <name>`, `Unknown prompt:
+  <name>`, `Resource not found` with `data.uri`). It used to be `404` with
+  `-32601`, which the transport reserves for a method the server does not
+  implement and which a client may read as an unsupported method. Hidden and
+  missing entries still answer identically. A 2025-era request under
+  `legacy="stateless"` gets `-32002` for a missing resource, the code its
+  revision defined; unknown methods keep `404`/`-32601`. The dev host's
+  unknown-tool reply to widgets matches.
 - `MCP(name, version, instructions="...")` publishes server instructions:
   in the `server/discover` result, and in `initialize` under
   `legacy="stateless"`. Omitted when unset; a non-string is a `TypeError` at

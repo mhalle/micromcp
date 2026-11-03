@@ -65,6 +65,12 @@ def code(resp):
     s, r, _ = resp
     return s, (r or {}).get("error", {}).get("code", "no error")
 
+def err(resp):
+    """(status, code, message): what a caller can tell two answers apart by."""
+    s, r, _ = resp
+    e = (r or {}).get("error", {})
+    return s, e.get("code", "no error"), e.get("message")
+
 def result(resp):
     s, r, _ = resp
     return (r or {}).get("result", "no result")
@@ -156,10 +162,12 @@ def untested_defenses():
     srv = Server(m, authenticate=auth)
 
     print("— U1 tool guards are enforced (M08: no guarded tool in the suite) —")
-    check("guarded tool, anonymous -> 404/-32601, indistinguishable from an unknown tool",
-          code(wsgi(srv, "tools/call", {"name": "secret_tool", "arguments": {}})), (404, -32601))
+    check("guarded tool, anonymous -> 400/-32602, indistinguishable from an unknown tool",
+          err(wsgi(srv, "tools/call", {"name": "secret_tool", "arguments": {}})),
+          (400, -32602, "Unknown tool: secret_tool"))
     check("...same answer as a tool that does not exist",
-          code(wsgi(srv, "tools/call", {"name": "no_such_tool", "arguments": {}})), (404, -32601))
+          err(wsgi(srv, "tools/call", {"name": "no_such_tool", "arguments": {}})),
+          (400, -32602, "Unknown tool: no_such_tool"))
     check("guarded tool, principal -> runs",
           result(wsgi(srv, "tools/call", {"name": "secret_tool", "arguments": {}}, auth="Bearer good")).get("structuredContent"), {"s": 1})
     names = lambda auth=None: sorted(t["name"] for t in result(wsgi(srv, "tools/list", auth=auth))["tools"])
@@ -168,11 +176,14 @@ def untested_defenses():
 
     print("— U2 a guard that raises denies, everywhere, without leaking (M07) —")
     s, r, _ = wsgi(srv, "tools/call", {"name": "gtool", "arguments": {}}, auth="Bearer good")
-    check("raising guard on a tool -> 404/-32601 (hidden)", (s, r["error"]["code"]), (404, -32601))
+    check("raising guard on a tool -> 400/-32602 (hidden)", (s, r["error"]["code"]), (400, -32602))
     check("...and the exception text stays server-side", SECRET in json.dumps(r), False)
-    check("raising guard on a resource -> 404/-32601", code(wsgi(srv, "resources/read", {"uri": "g://res"}, auth="Bearer good")), (404, -32601))
-    check("raising guard on a prompt -> 404/-32601",
-          code(wsgi(srv, "prompts/get", {"name": "gprompt", "arguments": {}}, auth="Bearer good")), (404, -32601))
+    check("raising guard on a resource -> 400/-32602, as if missing",
+          err(wsgi(srv, "resources/read", {"uri": "g://res"}, auth="Bearer good")),
+          (400, -32602, "Resource not found"))
+    check("raising guard on a prompt -> 400/-32602, as if unknown",
+          err(wsgi(srv, "prompts/get", {"name": "gprompt", "arguments": {}}, auth="Bearer good")),
+          (400, -32602, "Unknown prompt: gprompt"))
     check("raising guard hides from every listing",
           ("gtool" in names("Bearer good"),
            "g://res" in [x["uri"] for x in result(wsgi(srv, "resources/list", auth="Bearer good"))["resources"]],
@@ -313,8 +324,10 @@ def new_invariants():
     @m.resource("crash://{cid}", guards=[lambda p: p is not None])
     def crash(cid: int) -> str:
         return f"crash {cid}"
-    check("anonymous, bad int on a guarded template -> 404/-32601 (not -32602)",
-          code(wsgi(srv, "resources/read", {"uri": "crash://abc"})), (404, -32601))
+    check("anonymous, bad int on a guarded template -> 'Resource not found', not a conversion error",
+          err(wsgi(srv, "resources/read", {"uri": "crash://abc"})), (400, -32602, "Resource not found"))
+    check("...exactly the answer for a URI nothing serves",
+          err(wsgi(srv, "resources/read", {"uri": "nothing://abc"})), (400, -32602, "Resource not found"))
     check("principal, bad int -> -32602", code(wsgi(srv, "resources/read", {"uri": "crash://abc"}, auth="Bearer good")), (400, -32602))
     check("principal, good int -> 200", result(wsgi(srv, "resources/read", {"uri": "crash://7"}, auth="Bearer good"))["contents"][0]["text"], "crash 7")
     check("public API match_resource() still coerces", m.match_resource("crash://7")[1], {"cid": 7})
