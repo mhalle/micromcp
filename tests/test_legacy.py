@@ -5,7 +5,7 @@ the official mcp client in both of its modes.
 import asyncio, io, json, socket, threading, time
 import httpx
 from micromcp import (MCP, Server, ASGIServer, Context, Error, Unauthorized, PROTOCOL, META_VER,
-                      META_CAPS, META_CLIENT, LEGACY_VERSIONS, WELL_KNOWN)
+                      META_CAPS, META_CLIENT, META_LOG, LEGACY_VERSIONS, WELL_KNOWN)
 from _helpers import free_port
 
 OK = FAIL = 0
@@ -450,6 +450,7 @@ async def oauth_asgi_section():
         check("ASGI challenge names this server's document",
               r.headers.get("www-authenticate"), f'Bearer resource_metadata="http://127.0.0.1{WELL_KNOWN}/mcp"')
         lb, lh = modern("tools/call", {"name": "leaky", "arguments": {}}, name="leaky")
+        lb["params"]["_meta"] = {**MODERN_META, META_LOG: "info"}   # its log line opens the stream
         async with c.stream("POST", base + "/mcp", json=lb, headers={**lh, "Accept": "application/json, text/event-stream",
                                                                      "Authorization": "Bearer ok"}) as rs:
             ctype = rs.headers.get("content-type", "")

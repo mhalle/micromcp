@@ -13,6 +13,10 @@ META_CAPS = "io.modelcontextprotocol/clientCapabilities"
 META_SERVER = "io.modelcontextprotocol/serverInfo"
 META_SUB = "io.modelcontextprotocol/subscriptionId"
 META_CLIENT = "io.modelcontextprotocol/clientInfo"
+META_LOG = "io.modelcontextprotocol/logLevel"
+# RFC 5424 severities, least severe first; a request's logLevel admits its own
+# level and everything after it.
+LOG_LEVELS = ("debug", "info", "notice", "warning", "error", "critical", "alert", "emergency")
 # Handshake-era revisions served, per request and without sessions, when a
 # server is built with legacy="stateless". Newest first: it is the answer to
 # an initialize naming a version we do not know. 2025-03-26 is not listed:
