@@ -3,6 +3,25 @@
 ## Unreleased
 
 ### Core
+- `MCP(..., title=, description=, website_url=, icons=)` publishes the spec's
+  optional identity fields in `serverInfo` (every result's `_meta`, and
+  `initialize` under `legacy="stateless"`); unset ones are left out.
+  `MCP.server_info()` returns the object.
+- `icons=` on `@mcp.tool`, `@mcp.resource` (templates too), and `@mcp.prompt`,
+  published in listings. Icons are validated where they are defined: known
+  keys only, `src` an http(s) URL or a base64 `data:` URI, `sizes` like
+  `"48x48"` or `"any"`, `theme` `"light"` or `"dark"`.
+- Server Cards (`io.modelcontextprotocol/server-card`):
+  `server_card={"url", "name", "repository"}` on `Server` and `ASGIServer`
+  serves a card at `<url>/server-card` as `application/mcp-server-card+json`,
+  built from the registry (so it matches `serverInfo` and the versions
+  served), checked at construction, answered before authentication, readable
+  from any origin, cacheable, and revalidated by `ETag` with `304`. The
+  Django adapters serve it too. New constants `SERVER_CARD`,
+  `SERVER_CARD_MIME`, `SERVER_CARD_SCHEMA`. New suite `tests/test_identity.py`,
+  which also validates cards against the extension's published JSON Schema
+  (vendored in `tests/schemas/`); `conform.py` now sets every identity field
+  and icon.
 - `MCP(name, version, instructions="...")` publishes server instructions:
   in the `server/discover` result, and in `initialize` under
   `legacy="stateless"`. Omitted when unset; a non-string is a `TypeError` at

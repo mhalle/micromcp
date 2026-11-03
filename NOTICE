@@ -2,3 +2,7 @@ micromcp
 Copyright 2026 the micromcp authors
 
 Licensed under the Apache License, Version 2.0; see LICENSE.
+
+tests/schemas/server-card.schema.json is the MCP Server Card JSON Schema from
+https://github.com/modelcontextprotocol/ext-server-card (commit 92999cb3f5d8),
+Copyright the Model Context Protocol authors, Apache License 2.0.
