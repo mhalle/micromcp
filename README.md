@@ -288,7 +288,16 @@ Behaviors worth knowing:
   one raises inside the handler rather than tearing the stream down.
 - Progress requires the client to send a `progressToken`; without one the
   notifications are dropped (there is nothing to correlate them to) while the
-  result is still delivered normally. Logging carries no token and is unaffected.
+  result is still delivered normally.
+- Log messages require the client to name a level in
+  `_meta["io.modelcontextprotocol/logLevel"]`, as the spec requires: without
+  one, `ctx.info()` and the rest send nothing, and with one, only messages at
+  or above it go out. An unknown level is `-32602` from the client and a
+  `ValueError` from the handler. `ctx.log_level` is the level asked for, or
+  `None`, so a handler can skip building a costly message. 2025-era requests
+  under `legacy="stateless"` have no such field and get every message. The
+  spec has deprecated logging (earliest removal 2027-07-28) in favor of the
+  server's own logs or OpenTelemetry.
 - Under WSGI, notifications are dropped entirely and the call returns ordinary
   JSON. WSGI has no portable client-disconnect signal, so it cannot honor the
   spec's cancellation rule; shipping a stream that keeps computing after the
@@ -471,7 +480,7 @@ format:
 | Group | Names |
 |---|---|
 | Protocol | `PROTOCOL` (`"2026-07-28"`), `LEGACY_VERSIONS`, `WELL_KNOWN` |
-| `_meta` keys | `META_VER`, `META_CAPS`, `META_CLIENT`, `META_SERVER`, `META_SUB` |
+| `_meta` keys | `META_VER`, `META_CAPS`, `META_CLIENT`, `META_SERVER`, `META_SUB`, `META_LOG` (and its `LOG_LEVELS`) |
 | Error codes | `PARSE_ERROR`, `INVALID_REQUEST`, `METHOD_NOT_FOUND`, `INVALID_PARAMS`, `INTERNAL_ERROR`, `HEADER_MISMATCH`, `UNSUPPORTED_VERSION`, `UNAUTHORIZED` |
 | Methods and headers | `HANDSHAKE_METHODS`, `LIST_METHODS`, `ROUTING_HEADERS`, `SINGLETON_HEADERS`, `CORS_HEADERS` |
 | Tunable defaults | `MAX_BODY`, `MAX_URI`, `MAX_DEPTH`, `OFFLOAD_BYTES`, `QUEUE_SIZE`, `STREAM_BUDGET`, `KEEPALIVE`, `CANCEL_GRACE`, `WORKERS` |

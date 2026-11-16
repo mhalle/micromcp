@@ -8,7 +8,7 @@ import asyncio, contextlib, dataclasses, datetime, enum, io, json, os, signal, s
 import sys, threading, time, types, typing
 import httpx
 from micromcp import (MCP, Server, ASGIServer, Context, Principal,
-                      PROTOCOL, META_VER, META_CAPS)
+                      PROTOCOL, META_VER, META_CAPS, META_LOG)
 from _helpers import free_port
 
 OK = FAIL = 0
@@ -159,12 +159,14 @@ if os.environ.get("MICROMCP_WARMUP"):      # C6: import-time request before fork
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
-def body(method, params=None, *, rid=1, meta=True, token=None):
+def body(method, params=None, *, rid=1, meta=True, token=None, log_level=None):
     params = dict(params or {})
     if meta:
         params["_meta"] = {META_VER: PROTOCOL, META_CAPS: {}}
         if token is not None:
             params["_meta"]["progressToken"] = token
+        if log_level is not None:
+            params["_meta"][META_LOG] = log_level
     b = {"jsonrpc": "2.0", "method": method, "params": params}
     if rid is not None:
         b["id"] = rid
@@ -377,7 +379,7 @@ def main():
 
             print("— H6 bad notification payload does not kill the stream —")
             frames = []
-            async with c.stream("POST", url, json=body("tools/call", {"name": "bad_note", "arguments": {}}),
+            async with c.stream("POST", url, json=body("tools/call", {"name": "bad_note", "arguments": {}}, log_level="info"),
                                 headers=HDRS("bad_note")) as r:
                 async for line in r.aiter_lines():
                     if line.startswith("data: "):
@@ -1280,7 +1282,7 @@ def round3():
         srv = serve_uvicorn(bapp, port)
         frames = []
         async with httpx.AsyncClient(timeout=30) as c:
-            async with c.stream("POST", f"http://127.0.0.1:{port}/mcp", json=body("tools/call", {"name": "chatty", "arguments": {}}, token="t"),
+            async with c.stream("POST", f"http://127.0.0.1:{port}/mcp", json=body("tools/call", {"name": "chatty", "arguments": {}}, token="t", log_level="info"),
                                 headers=HDRS("chatty")) as r:
                 async for line in r.aiter_lines():
                     if line.startswith("data: "):

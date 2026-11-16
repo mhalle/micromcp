@@ -13,6 +13,14 @@
   `legacy="stateless"` gets `-32002` for a missing resource, the code its
   revision defined; unknown methods keep `404`/`-32601`. The dev host's
   unknown-tool reply to widgets matches.
+- Log messages follow the request's `io.modelcontextprotocol/logLevel`, as
+  2026-07-28 requires. A request without it gets no `notifications/message`
+  (they used to go to every streaming call), one with it gets only messages
+  at or above that level, and an unknown or null level is `-32602`.
+  `Context.log()` raises `ValueError` for a level the spec does not define,
+  and `ctx.log_level` reports what the client asked for. 2025-era requests
+  under `legacy="stateless"` still get every message. New constants
+  `META_LOG` and `LOG_LEVELS`.
 - `MCP(name, version, instructions="...")` publishes server instructions:
   in the `server/discover` result, and in `initialize` under
   `legacy="stateless"`. Omitted when unset; a non-string is a `TypeError` at

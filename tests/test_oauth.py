@@ -8,7 +8,7 @@ import asyncio, base64, collections, concurrent.futures, hashlib, hmac, http.ser
 import json, logging, sys, threading, time
 from urllib.parse import parse_qs
 from micromcp import (MCP, Server, ASGIServer, Context, Error, Principal, Unauthorized, PROTOCOL,
-                      META_VER, META_CAPS, WELL_KNOWN)
+                      META_VER, META_CAPS, META_LOG, WELL_KNOWN)
 from _helpers import free_port
 
 OK = FAIL = 0
@@ -119,7 +119,8 @@ STREAM_HDRS = {"content-type": "application/json", "accept": "application/json, 
 def stream_body(name):
     return json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                        "params": {"name": name, "arguments": {},
-                                  "_meta": {META_VER: PROTOCOL, META_CAPS: {}}}}).encode()
+                                  "_meta": {META_VER: PROTOCOL, META_CAPS: {},
+                                            META_LOG: "info"}}}).encode()
 
 
 def asgi_call(app, name):
