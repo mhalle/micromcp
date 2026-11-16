@@ -235,7 +235,9 @@ use the manifest to verify what they read and to tie a user's approval to the
 exact content, so files are read once, at registration: every request serves
 those bytes, and a skill changed on disk needs `replace=True` or a restart.
 Dot-files and `__pycache__` are left out; a symlink leading out of the
-directory is refused.
+directory, or to one of those, is refused, and so are two files whose names
+differ only in case. The 512-file and 16 MiB limits are checked as files are
+read, so an oversized file is refused without being read whole.
 
 Registration checks what a host will check. The frontmatter needs a `name`
 (lowercase letters, digits, and single hyphens, matching the directory) and a
@@ -245,8 +247,11 @@ skill holds at most 512 files and 16 MiB. Because hosts compare the
 frontmatter against their own YAML parser's reading of `SKILL.md`, it is read
 by a strict subset — `key: value` lines, a one-level `metadata` map, quoted
 strings, and `|`/`>` blocks — that refuses everything else and every plain
-value YAML parsers disagree on (`yes`, `on`, `012`, `1e3`, `2024-01-01`): quote
-those. `guards=` hide a skill and its files the way they hide resources. Its
+value YAML parsers disagree on (`yes`, `on`, `012`, `1e3`, `1_000`, `2024-01-01`):
+quote those. Keys must be strings to YAML too (`true:` and `1:` are refused), and
+so is any character a YAML parser reads as a line break or does not allow (a
+lone CR, NEL, U+2028, control characters), since a host parsing the same bytes
+would see different lines. The frontmatter is capped at 64 KiB. `guards=` hide a skill and its files the way they hide resources. Its
 `SKILL.md` appears in `resources/list` with the frontmatter's name and
 description; the other files are readable but not listed. `prefix=` groups
 skills under a path (`acme/billing`); a skill nested inside another may be
@@ -742,7 +747,7 @@ conform.py          12 checks against the strict mcp-types wire schema
 test_identity.py    74 checks: identity fields, icons, the Server Card on both transports
 test_guards.py      24 checks: async guards, hidden streaming tools, path= validation
 test_fallback.py    42 checks: fallback= on both transports, Host guard, WebSockets, lifespan
-test_skills.py      108 checks: skills, directory reads, the frontmatter subset (against PyYAML)
+test_skills.py      154 checks: skills, directory reads, the frontmatter subset (against PyYAML)
 interop.py          end-to-end with the official mcp client, 9 assertions
 test_asgi.py        native ASGI under uvicorn and mounted in Starlette
 test_progress.py    40 SSE checks: ordering, cancellation, subscriptions/listen, WSGI degradation
