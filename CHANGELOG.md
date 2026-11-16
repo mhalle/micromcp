@@ -40,6 +40,23 @@
   which also validates cards against the extension's published JSON Schema
   (vendored in `tests/schemas/`); `conform.py` now sets every identity field
   and icon.
+- Skills over MCP (`io.modelcontextprotocol/skills`): `mcp.skill(path_or_files,
+  prefix=, guards=, replace=)` serves an Agent Skill as `skill://` resources
+  and answers `skills/list`, `skills/get`, and `resources/directory/read`.
+  Entries carry the verbatim frontmatter and a complete manifest with SHA-256
+  digests and sizes; files are snapshotted at registration so served bytes
+  always match them. Registration enforces the Agent Skills naming rules,
+  the per-skill limits (512 files, 16 MiB), URI-safe file names, and no
+  symlinks out of the directory. Frontmatter is read by a strict YAML subset
+  that refuses constructs it does not support and plain values YAML 1.1 and
+  1.2 parsers read differently, so the entry is what a host parses; the test
+  suite cross-checks it against PyYAML. New module `micromcp.skills`, new
+  constants `SKILLS_EXT`, `DIRECTORY_MIME`, `SKILL_MAX_FILES`,
+  `SKILL_MAX_BYTES`, and new suite `tests/test_skills.py`.
+- `MCP(..., extensions={identifier: settings})` declares extensions, published
+  as `capabilities.extensions` in `server/discover` and in `initialize` under
+  `legacy="stateless"`; a registered skill adds its own. MCP Apps widgets do
+  not declare `io.modelcontextprotocol/ui` automatically.
 - `MCP(name, version, instructions="...")` publishes server instructions:
   in the `server/discover` result, and in `initialize` under
   `legacy="stateless"`. Omitted when unset; a non-string is a `TypeError` at

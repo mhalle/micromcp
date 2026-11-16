@@ -9,11 +9,12 @@ import json
 import re
 from urllib.parse import urlsplit
 
-from ._constants import _NAME_RE, INVALID_PARAMS, log
+from ._constants import _NAME_RE, INVALID_PARAMS, SKILLS_EXT, log
 
 from .docstrings import _parse_doc
 from .errors import Error, Unauthorized
 from .schema import _fname, _hints, _input_schema, _output_schema
+from .skills import build_skill
 
 _LABEL = r"[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?"
 _META_KEY_RE = re.compile(rf"^(?:({_LABEL}(?:\.{_LABEL})*)/)?"
@@ -38,6 +39,27 @@ def _meta_ok(meta, what: str) -> dict:
         return json.loads(json.dumps(meta, allow_nan=False))
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{what} meta is not JSON-serializable: {exc}") from None
+
+
+def _extensions_ok(extensions) -> dict:
+    """Validate server extension declarations ({identifier: settings}) and
+    return a detached copy. An identifier is a prefixed `_meta`-style key,
+    such as `io.modelcontextprotocol/ui` or `com.example/feature`."""
+    if not isinstance(extensions, dict):
+        raise TypeError("extensions must be a dict of {identifier: settings dict}")
+    for ident, settings in extensions.items():
+        m = _META_KEY_RE.match(ident) if isinstance(ident, str) else None
+        if not m or not m.group(1):
+            raise ValueError(f"extension identifier {ident!r} must be 'vendor-prefix/name', "
+                             f"e.g. 'com.example/feature'")
+        if ident == SKILLS_EXT:
+            raise ValueError(f"{SKILLS_EXT} is declared by mcp.skill(), not by hand")
+        if not isinstance(settings, dict):
+            raise ValueError(f"extension {ident!r}: settings must be a dict ({{}} for none)")
+    try:
+        return json.loads(json.dumps(extensions, allow_nan=False))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"extension settings are not JSON-serializable: {exc}") from None
 
 
 _AUDIENCE = ("user", "assistant")
@@ -259,11 +281,15 @@ class MCP:
                   `src` and optionally `mimeType`, `sizes`, `theme`). Published
                   in `serverInfo` beside `name` and `version`, and used by a
                   Server Card.
+    extensions    {identifier: settings} for extensions this server supports,
+                  published as `capabilities.extensions` (e.g.
+                  `{"io.modelcontextprotocol/ui": {}}`). Skills declare theirs
+                  themselves.
     """
 
     def __init__(self, name: str, version: str = "0.1.0", *, instructions: str | None = None,
                  title: str | None = None, description: str | None = None,
-                 website_url: str | None = None, icons=None):
+                 website_url: str | None = None, icons=None, extensions: dict | None = None):
         for label, value in (("instructions", instructions), ("title", title),
                              ("description", description)):
             if value is not None and not isinstance(value, str):
@@ -273,10 +299,13 @@ class MCP:
         self.title, self.description = title, description
         self.website_url = None if website_url is None else _http_url_ok(website_url, "website_url")
         self.icons = None if icons is None else _icons_ok(icons, "server")
+        self.extensions = {} if extensions is None else _extensions_ok(extensions)
         self.tools: dict[str, dict] = {}
         self.resources: dict[str, dict] = {}
         self.templates: dict[str, dict] = {}
         self.prompts: dict[str, dict] = {}
+        self.skills: dict[str, dict] = {}        # SKILL.md URI -> skill record
+        self.skill_files: dict[str, dict] = {}   # file URI -> {data, mime, skills}
 
     def server_info(self) -> dict:
         """The `Implementation` object clients see as `serverInfo`: name and
@@ -404,6 +433,8 @@ class MCP:
             if icons is not None:
                 entry["icons"] = _icons_ok(icons, f"resource {uri!r}")
             registry = self.templates if rx is not None else self.resources
+            if uri in self.skill_files:
+                raise ValueError(f"resource {uri!r} is a file of a registered skill")
             if uri in registry and not replace:
                 raise ValueError(f"resource {uri!r} is already registered (pass replace=True)")
             if rx is not None:
@@ -446,6 +477,50 @@ class MCP:
             self.prompts[n] = entry
             return f
         return wrap(fn) if fn else wrap
+
+    def skill(self, source, *, prefix=None, guards=(), replace=False) -> str:
+        """Serve an Agent Skill (Skills over MCP). `source` is the skill's
+        directory, or a `{relative path: str | bytes}` dict that includes
+        `SKILL.md`. Returns the skill's URI, `skill://[<prefix>/]<name>/SKILL.md`.
+
+        The files are read once, here: every request serves these bytes, and
+        the digests in `skills/list` and `skills/get` match them, so a changed
+        skill needs re-registering (`replace=True`) or a restart. Dot-files and
+        `__pycache__` are left out. The frontmatter must satisfy the Agent
+        Skills rules (`name` matching the directory), and is read by a strict
+        YAML subset: plain values that YAML parsers read differently (`yes`,
+        `012`, `1e3`, dates) must be quoted, so the entry is exactly what a host
+        parses. `guards` hide the skill and its files as they hide resources.
+        SKILL.md is listed in `resources/list`; the other files are readable but
+        not listed. Registering a skill declares the extension.
+        """
+        rec = build_skill(source, prefix)
+        uri = rec["uri"]
+        if uri in self.skills and not replace:
+            raise ValueError(f"skill {uri!r} is already registered (pass replace=True)")
+        for fu, (data, _mime) in rec["files"].items():
+            if fu in self.resources:
+                raise ValueError(f"skill file {fu!r} is already registered as a resource")
+            held = self.skill_files.get(fu)
+            others = [s for s in (held or {}).get("skills", ()) if s != uri]
+            if others and held["data"] != data:
+                raise ValueError(f"skill file {fu!r} is also served by {others[0]!r} with "
+                                 f"different content")
+        if uri in self.skills:
+            self._drop_skill(uri)
+        rec["_guards"] = tuple(guards)
+        self.skills[uri] = rec
+        for fu, (data, mime) in rec.pop("files").items():
+            held = self.skill_files.setdefault(fu, {"data": data, "mime": mime, "skills": []})
+            held["skills"].append(uri)
+        return uri
+
+    def _drop_skill(self, uri: str):
+        del self.skills[uri]
+        for fu in [f for f, h in self.skill_files.items() if uri in h["skills"]]:
+            self.skill_files[fu]["skills"].remove(uri)
+            if not self.skill_files[fu]["skills"]:
+                del self.skill_files[fu]
 
     def match_resource(self, uri: str):
         """Resolve a URI to (entry, kwargs). Exact hits win over templates;
