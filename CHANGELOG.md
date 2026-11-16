@@ -15,6 +15,16 @@
 - `path=` must start with `/`. `path="mcp"` could never match a request, so
   every request was a `404`, or, with `fallback=`, handed to the fallback with
   its bearer token.
+- `allowed_hosts` admitted any Host of the form `<allowed>:<anything>`, such as
+  `localhost:@evil.test`, and handed that value on (to `fallback=`, among
+  others). A listed name now matches only alone or with a numeric port, and a
+  Host holding a comma (two copies folded into one by a WSGI server) is never
+  admitted; the endpoint, the Server Card, the RFC 9728 document, and the
+  fallback all apply the same rule. Affects 0.2.0 and earlier.
+- `fallback=` without `allowed_hosts` logs a warning: the endpoint's Origin
+  check also shields it from DNS rebinding, but a rebinding page's plain GET
+  carries no Origin, so only `allowed_hosts` protects what the fallback
+  serves. The README example now sets it.
 
 ### Core
 - **Behavior change:** an unknown or guard-hidden tool (`tools/call`), prompt

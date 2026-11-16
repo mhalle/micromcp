@@ -141,6 +141,41 @@ check("an allowed Host (with a port) reaches the fallback", (s, len(seen)), (200
 s, h, out = wsgi(app, "/r/a.png", headers={"Host": "anything.test, at.all"})
 check("without allowed_hosts, the fallback judges Host itself", s, 200)
 
+print("\nwhat counts as an allowed Host (every surface)")
+n = len(seen)
+for host in ("example.test:@evil.test", "example.test:x@evil.test/", "example.test:80a",
+             "example.test:", "example.test:\uff18\uff10", "example.test:123456"):
+    s, h, out = wsgi(guarded, "/r/a.png", headers={"Host": host})
+    check(f"fallback: Host {host!r} is not the allowed name plus a port", (s, len(seen)), (403, n))
+full = Server(mcp, path="/mcp", fallback=render, allowed_hosts={"example.test", "[::1]"},
+              server_card=CARD, resource_metadata=META)
+for label, path, method, body, hdrs in [
+        ("endpoint", "/mcp", "POST", RPC, MCP_HDRS),
+        ("Server Card", "/mcp/server-card", "GET", b"", {}),
+        ("RFC 9728 document", "/.well-known/oauth-protected-resource/mcp", "GET", b"", {})]:
+    bad = wsgi(full, path, method=method, body=body, headers={**hdrs, "Host": "example.test:@evil.test"})[0]
+    folded = wsgi(full, path, method=method, body=body,
+                  headers={**hdrs, "Host": "example.test:1,evil.test"})[0]
+    good = wsgi(full, path, method=method, body=body, headers={**hdrs, "Host": "example.test:8443"})[0]
+    check(f"{label}: 'name:junk' and a folded repeat are refused, 'name:port' admitted",
+          (bad, folded in (400, 403), good), (403, True, 200))
+check("a bracketed IPv6 name with a port is admitted",
+      wsgi(full, "/r/a.png", headers={"Host": "[::1]:8000"})[0], 200)
+
+print("\na fallback without allowed_hosts says so")
+import logging  # noqa: E402
+records = []
+handler = logging.Handler()
+handler.emit = records.append
+logging.getLogger("micromcp").addHandler(handler)
+Server(mcp, path="/mcp", fallback=render)
+check("warned", any("allowed_hosts" in r.getMessage() for r in records), True)
+records.clear()
+Server(mcp, path="/mcp", fallback=render, allowed_hosts={"example.test"})
+Server(mcp, path="/mcp")
+check("not warned with allowed_hosts, or without a fallback", records, [])
+logging.getLogger("micromcp").removeHandler(handler)
+
 # ── ASGI ─────────────────────────────────────────────────────────────────────
 print("\nASGI routing")
 calls = []
@@ -218,6 +253,8 @@ async def run_asgi():
           (sent[0], len(calls)), ({"type": "websocket.close", "code": 1008}, n))
     sent = await asgi(guarded, "/r/a.png")
     check("an allowed Host reaches the fallback", (sent[0]["status"], len(calls)), (200, n + 1))
+    sent = await asgi(guarded, "/r/a.png", headers=[(b"host", b"example.test:@evil.test")])
+    check("'name:junk' is not the allowed name plus a port", (sent[0]["status"], len(calls)), (403, n + 1))
 
 
 asyncio.run(run_asgi())

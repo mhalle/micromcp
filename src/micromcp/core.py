@@ -482,6 +482,11 @@ class _Core:
                 raise ValueError("fallback= needs path=: without it every path is the MCP "
                                  "endpoint, and the fallback would never be called")
         self.fallback = fallback
+        if fallback is not None and not allowed_hosts:
+            # The endpoint is shielded from DNS rebinding by its Origin check
+            # too; the fallback is not, since a same-origin GET carries none.
+            log.warning("fallback= without allowed_hosts: a DNS-rebinding page can read what "
+                        "the fallback serves; pass allowed_hosts= with this server's names")
         self.metadata_url = None
         if resource_metadata is not None:
             if not isinstance(resource_metadata, dict):
@@ -550,9 +555,18 @@ class _Core:
         return origin is None or origin in self.allowed_origins
 
     def _host_ok(self, headers) -> bool:
+        """The DNS-rebinding guard: Host is an allowed name, optionally with a
+        port of ASCII digits. Anything else after a colon is not a port
+        (`localhost:@evil.test` is not `localhost`), and a comma means two
+        Host headers folded into one, which no check can trust."""
+        if not self.allowed_hosts:
+            return True
         host = headers.get("host", "").lower()
-        return (not self.allowed_hosts or host in self.allowed_hosts
-                or host.rsplit(":", 1)[0] in self.allowed_hosts)
+        if host in self.allowed_hosts:
+            return True
+        name, colon, port = host.rpartition(":")
+        return (bool(colon) and name in self.allowed_hosts and port.isascii()
+                and port.isdigit() and len(port) <= 5)
 
     def extra_headers(self, http_method, headers, status, reply_headers=()) -> list:
         """Headers every response carries: protocol version, Allow on 405,

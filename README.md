@@ -446,7 +446,9 @@ where the bounded queue alone cannot apply backpressure.
 `allowed_origins` also drives CORS: preflights from a listed Origin get `204`
 with `Access-Control-Allow-*`, other Origins (including an empty one) get
 `403`, and no Origin header means a non-browser client. `allowed_hosts` is off
-when empty. `Content-Type` must be `application/json` when present.
+when empty; a listed name matches with or without a numeric port
+(`mcp.example.com:8443`), and nothing else after a colon counts as one.
+`Content-Type` must be `application/json` when present.
 
 Guards are predicates over the principal only — they cannot see call arguments,
 so per-record authorization belongs inside the handler. They apply to tools,
@@ -587,18 +589,21 @@ def files(environ, start_response):            # any WSGI app: here, the standar
     start_response("200 OK", [("Content-Type", "image/png")])
     return [blob]
 
-app = Server(mcp, path="/mcp", fallback=files)  # ASGIServer takes an ASGI app the same way
+app = Server(mcp, path="/mcp", fallback=files,  # ASGIServer takes an ASGI app the same way
+             allowed_hosts={"localhost", "127.0.0.1"})
 
 from wsgiref.simple_server import make_server
-make_server("", 8000, app).serve_forever()
+make_server("127.0.0.1", 8000, app).serve_forever()
 ```
 
 The fallback needs `path=`, since without it every path is the endpoint. It
 gets the request as it came, body unread and with no MCP checks, so its own
 answers, headers, and CORS are its own. The one guard that still applies is
 `allowed_hosts`: a Host it does not admit, or a repeated Host, is refused before
-the fallback is called, because DNS-rebinding protection should cover every path
-the server answers. The Server Card and the RFC 9728 document stay micromcp's.
+the fallback is called. Set it whenever there is a fallback. The endpoint is
+also shielded from DNS rebinding by its Origin check, but a rebinding page's
+plain GET carries no Origin, so without `allowed_hosts` it can read whatever
+the fallback serves; a server built that way logs a warning. The Server Card and the RFC 9728 document stay micromcp's.
 On `ASGIServer`, WebSocket connections to other paths go to the fallback too
 (one to the endpoint is still refused), and the lifespan stays micromcp's: the
 fallback gets no startup or shutdown events. A WSGI app given to `ASGIServer`,
@@ -736,7 +741,7 @@ test_micromcp.py    29 unit assertions, stdlib only
 conform.py          12 checks against the strict mcp-types wire schema
 test_identity.py    74 checks: identity fields, icons, the Server Card on both transports
 test_guards.py      24 checks: async guards, hidden streaming tools, path= validation
-test_fallback.py    29 checks: fallback= on both transports, Host guard, WebSockets, lifespan
+test_fallback.py    42 checks: fallback= on both transports, Host guard, WebSockets, lifespan
 test_skills.py      108 checks: skills, directory reads, the frontmatter subset (against PyYAML)
 interop.py          end-to-end with the official mcp client, 9 assertions
 test_asgi.py        native ASGI under uvicorn and mounted in Starlette
