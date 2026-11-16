@@ -29,6 +29,13 @@ SERVER_CARD = "/server-card"
 SERVER_CARD_MIME = "application/mcp-server-card+json"
 SERVER_CARD_SCHEMA = "https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json"
 
+# Skills over MCP: the extension identifier, the MIME type of a directory
+# resource, and the per-skill limits every conforming host accepts.
+SKILLS_EXT = "io.modelcontextprotocol/skills"
+DIRECTORY_MIME = "inode/directory"
+SKILL_MAX_FILES = 512
+SKILL_MAX_BYTES = 16 * 1024 * 1024
+
 # JSON-RPC / MCP error codes
 PARSE_ERROR = -32700
 INVALID_REQUEST = -32600

@@ -212,6 +212,57 @@ still list them after connecting. Domain-wide discovery, an AI Catalog at
 `/.well-known/ai-catalog.json` that links to cards, belongs to the site rather
 than to one MCP server, and is not served here.
 
+## Skills
+
+```python
+mcp.skill(Path("skills/pdf-processing"))              # -> "skill://pdf-processing/SKILL.md"
+mcp.skill({"SKILL.md": SKILL_TEXT, "examples/email.md": EMAIL},
+          prefix="acme/billing", guards=[is_staff])     # -> "skill://acme/billing/refunds/SKILL.md"
+```
+
+An [Agent Skill](https://agentskills.io/specification) is a directory of
+workflow instructions for the model, a `SKILL.md` plus any references,
+scripts, or assets. `mcp.skill()` serves one under the Skills over MCP
+extension (`io.modelcontextprotocol/skills`, Beta): registering one declares
+the extension in `capabilities.extensions` (with `directoryRead`), and the
+server answers `skills/list` and `skills/get` with each skill's verbatim
+frontmatter and a complete manifest of its files (a SHA-256 digest and size
+for each), `resources/read` for the files themselves, and
+`resources/directory/read` for any directory level under `skill://`. Hosts
+use the manifest to verify what they read and to tie a user's approval to the
+exact content, so files are read once, at registration: every request serves
+those bytes, and a skill changed on disk needs `replace=True` or a restart.
+Dot-files and `__pycache__` are left out; a symlink leading out of the
+directory is refused.
+
+Registration checks what a host will check. The frontmatter needs a `name`
+(lowercase letters, digits, and single hyphens, matching the directory) and a
+`description`; `metadata` values must be strings; file names are limited to
+letters, digits, `.`, `_`, `~`, and `-`, so each URI is its own spelling; a
+skill holds at most 512 files and 16 MiB. Because hosts compare the
+frontmatter against their own YAML parser's reading of `SKILL.md`, it is read
+by a strict subset — `key: value` lines, a one-level `metadata` map, quoted
+strings, and `|`/`>` blocks — that refuses everything else and every plain
+value YAML parsers disagree on (`yes`, `on`, `012`, `1e3`, `2024-01-01`): quote
+those. `guards=` hide a skill and its files the way they hide resources. Its
+`SKILL.md` appears in `resources/list` with the frontmatter's name and
+description; the other files are readable but not listed. `prefix=` groups
+skills under a path (`acme/billing`); a skill nested inside another may be
+registered as well, provided its files are byte-identical.
+
+**Other extensions.** `MCP(..., extensions={...})` declares extensions this
+server supports, published as `capabilities.extensions` in `server/discover`
+and, under `legacy="stateless"`, in `initialize`:
+
+```python
+mcp = MCP("newton-civic", "1.0.0", extensions={"io.modelcontextprotocol/ui": {}})
+```
+
+MCP Apps widgets do not declare `io.modelcontextprotocol/ui` automatically:
+the MCP Apps specification makes the server's declaration optional, and the
+widget verification in Claude above ran without it. Pass it as above if you
+want it advertised.
+
 ## UI apps (MCP Apps / MCP-UI)
 
 A widget is a static HTML page the host renders in a sandboxed iframe next to
@@ -536,6 +587,7 @@ format:
 | Group | Names |
 |---|---|
 | Protocol | `PROTOCOL` (`"2026-07-28"`), `LEGACY_VERSIONS`, `WELL_KNOWN`, `SERVER_CARD`, `SERVER_CARD_MIME`, `SERVER_CARD_SCHEMA` |
+| Skills | `SKILLS_EXT`, `DIRECTORY_MIME`, `SKILL_MAX_FILES`, `SKILL_MAX_BYTES` |
 | `_meta` keys | `META_VER`, `META_CAPS`, `META_CLIENT`, `META_SERVER`, `META_SUB`, `META_LOG` (and its `LOG_LEVELS`) |
 | Error codes | `PARSE_ERROR`, `INVALID_REQUEST`, `METHOD_NOT_FOUND`, `INVALID_PARAMS`, `INTERNAL_ERROR`, `HEADER_MISMATCH`, `UNSUPPORTED_VERSION`, `UNAUTHORIZED` |
 | Methods and headers | `HANDSHAKE_METHODS`, `LIST_METHODS`, `ROUTING_HEADERS`, `SINGLETON_HEADERS`, `CORS_HEADERS` |
@@ -549,7 +601,8 @@ arguments shown under Auth, not by assigning to the module. `log` is the
 
 Implemented: `server/discover`, `tools/list`, `tools/call`, `resources/list`,
 `resources/read`, `resources/templates/list`, `prompts/list`, `prompts/get`,
-plus progress and logging notifications.
+plus progress and logging notifications; with a skill registered, `skills/list`,
+`skills/get`, and `resources/directory/read`.
 
 Deliberately not implemented: sessions, resumable streams, change
 notifications (`subscriptions/listen` is accepted and closed gracefully),
@@ -647,8 +700,9 @@ on ephemeral ports. Ports and servers are never shared between suites.
 
 ```
 test_micromcp.py    29 unit assertions, stdlib only
-conform.py          11 checks against the strict mcp-types wire schema
+conform.py          12 checks against the strict mcp-types wire schema
 test_identity.py    74 checks: identity fields, icons, the Server Card on both transports
+test_skills.py      108 checks: skills, directory reads, the frontmatter subset (against PyYAML)
 interop.py          end-to-end with the official mcp client, 9 assertions
 test_asgi.py        native ASGI under uvicorn and mounted in Starlette
 test_progress.py    40 SSE checks: ordering, cancellation, subscriptions/listen, WSGI degradation
