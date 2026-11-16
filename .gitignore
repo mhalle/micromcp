@@ -4,6 +4,7 @@ build/
 dist/
 node_modules/
 package-lock.json
+uv.lock
 # the example ships its build, so the widget runs without a bundler installed
 !examples/bundled_ui/dist/
 *.egg-info/
