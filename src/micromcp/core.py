@@ -403,6 +403,17 @@ def _loads(raw):
     return json.loads(raw, parse_constant=_not_json, parse_float=_finite)
 
 
+_LEGACY_RESOURCE_NOT_FOUND = -32002      # the 2025-11-25 code
+
+
+class _ResourceNotFound(Error):
+    """`resources/read` of a URI that is not served (or is hidden): -32602
+    with the URI in `data`, as 2026-07-28 shows; -32002 to a 2025-era client."""
+
+    def __init__(self, uri):
+        super().__init__(INVALID_PARAMS, "Resource not found", data={"uri": uri})
+
+
 class _Core:
     """Transport-neutral MCP logic: validate, dispatch, wrap.
 
@@ -973,12 +984,12 @@ class _Core:
         if method == "tools/call":
             name = params.get("name")
             entry = m.tools.get(name)
-            if not entry:
-                raise Error(METHOD_NOT_FOUND, f"no such tool {name!r}", 404)
-            if not _allowed(entry, principal, strict=True):
-                # Indistinguishable from a tool that does not exist, as for
-                # resources and prompts: no existence oracle for hidden tools.
-                raise Error(METHOD_NOT_FOUND, f"no such tool {name!r}", 404)
+            # An unknown name is a bad parameter (-32602), not an unknown
+            # method: 404/-32601 is reserved for methods the server does not
+            # implement. A hidden tool answers exactly like a missing one, as
+            # for resources and prompts: no existence oracle.
+            if not entry or not _allowed(entry, principal, strict=True):
+                raise Error(INVALID_PARAMS, f"Unknown tool: {name}")
             kwargs = bound if bound is not None else await self._bind_call(params, principal, False)
             inject(entry, kwargs)
             try:
@@ -1002,7 +1013,7 @@ class _Core:
             uri = params.get("uri")
             entry, raw = m._match(uri or "")
             if not entry or not _allowed(entry, principal, strict=True):
-                raise Error(METHOD_NOT_FOUND, f"no such resource {uri!r}", 404)
+                raise _ResourceNotFound(uri)
             kwargs = m.coerce_params(entry, uri, raw)   # after the guard: -32602 reveals it
             inject(entry, kwargs)
             try:
@@ -1025,7 +1036,7 @@ class _Core:
             name = params.get("name")
             entry = m.prompts.get(name)
             if not entry or not _allowed(entry, principal, strict=True):
-                raise Error(METHOD_NOT_FOUND, f"no such prompt {name!r}", 404)
+                raise Error(INVALID_PARAMS, f"Unknown prompt: {name}")
             args = dict(params.get("arguments") or {})
             declared = {a["name"] for a in entry["arguments"]}
             extra = sorted(set(args) - declared)
@@ -1167,7 +1178,11 @@ class _Core:
                             "MCP clients cannot start OAuth from a bare challenge")
             hdrs = ([h for h in hdrs if h[0].lower() != "www-authenticate"]
                     + e.challenge(self.metadata_url))
-        return _err(status, rid, e.code, e.message, e.data, headers=hdrs)
+        # 2025-11-25 named a missing resource -32002; a 2025-era client gets
+        # its own era's code (2026-07-28 clients accept both).
+        code = (_LEGACY_RESOURCE_NOT_FOUND if era == "legacy" and isinstance(e, _ResourceNotFound)
+                else e.code)
+        return _err(status, rid, code, e.message, e.data, headers=hdrs)
 
     async def respond(self, req, emit=None, stop=None, headers=None):
         """Dispatch a prepared request. Returns (status_code, payload)."""
