@@ -131,7 +131,7 @@ window.addEventListener("message", ev => {
       status("host says: " + m.method);
   }
 });
-request("ui/initialize", {appInfo: {name: "crash-widget", version: "0.2.0"},
+request("ui/initialize", {appInfo: {name: "crash-widget", version: "0.3.0"},
                           appCapabilities: {availableDisplayModes: ["inline"]}, protocolVersion: APP_PROTOCOL})
   .then(res => {
     applyHostContext(res.hostContext);
