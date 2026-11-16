@@ -6,6 +6,15 @@ on:
     tags: ["v*"]
   pull_request:
 
+# A new push to a pull request cancels that PR's older run, which no longer
+# tests the branch and would hold a runner (macOS ones are scarce). Pushes to
+# main and tags are never cancelled: each is the record for its commit, and a
+# tag run may publish. They get a group of their own (the run id), because a
+# shared group would still drop an older run that is waiting for a runner.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     runs-on: ${{ matrix.os }}
