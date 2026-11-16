@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ._constants import LOG_LEVELS
+
 
 class Context:
     """Injected handler parameter for streaming progress and log messages.
@@ -21,17 +23,29 @@ class Context:
     cannot honor the spec's cancellation rule — notifications are dropped and
     the call still returns its normal JSON result.
 
+    Log messages go out only when the request asked for them: a 2026-07-28
+    request names `io.modelcontextprotocol/logLevel` in its `_meta`, and
+    messages below that level are dropped (`ctx.log_level` is None when it
+    asked for none). A 2025-era request, which has no such field, gets them all.
+
     Notification payloads must be JSON-serializable; a bad one raises inside
     the handler (surfacing as an in-band isError) rather than tearing the
     stream down. A sync (`def`) handler cannot be interrupted by cancellation;
     poll `ctx.cancelled` from long loops to stop cooperatively.
     """
 
-    def __init__(self, emit=None, progress_token=None, stop=None, meta=None):
+    def __init__(self, emit=None, progress_token=None, stop=None, meta=None, log_level=None):
         self._emit = emit
         self._token = progress_token
         self._stop = stop
         self._meta = dict(meta or {})
+        self._level = log_level
+
+    @property
+    def log_level(self) -> str | None:
+        """The least severe level the client wants log messages at, or None
+        when it asked for none; check it before building a costly message."""
+        return self._level
 
     @property
     def request_meta(self) -> dict:
@@ -76,7 +90,12 @@ class Context:
         await self._emit("notifications/progress", params)
 
     async def log(self, level, data, logger=None):
-        if self._emit is None:
+        # An unknown level is the handler's bug, so it raises whether or not
+        # this client is listening.
+        if level not in LOG_LEVELS:
+            raise ValueError(f"unknown log level {level!r}; use one of {', '.join(LOG_LEVELS)}")
+        if (self._emit is None or self._level is None
+                or LOG_LEVELS.index(level) < LOG_LEVELS.index(self._level)):
             return
         params = {"level": level, "data": data}
         if logger:

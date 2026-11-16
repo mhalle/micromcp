@@ -540,7 +540,7 @@ reaches only that process's connections. Under WSGI each waiting
 
 Mind the host's widget cache when you change a widget. Claude keeps serving a
 connector's widget as first fetched, so after a redeploy an old widget still
-calls the tools it knew: remove one and it fails with "no such tool" (seen on
+calls the tools it knew: remove one and it fails as an unknown tool (seen on
 2026-09-14 when the 3D example moved from polling to a channel). Keep app-only
 tools an older widget uses working, and reach the new widget through a new
 connector (a new path or host).

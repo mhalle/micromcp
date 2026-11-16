@@ -8,7 +8,7 @@ import asyncio, contextlib, dataclasses, datetime, enum, io, json, os, signal, s
 import sys, threading, time, types, typing
 import httpx
 from micromcp import (MCP, Server, ASGIServer, Context, Principal,
-                      PROTOCOL, META_VER, META_CAPS)
+                      PROTOCOL, META_VER, META_CAPS, META_LOG)
 from _helpers import free_port
 
 OK = FAIL = 0
@@ -159,12 +159,14 @@ if os.environ.get("MICROMCP_WARMUP"):      # C6: import-time request before fork
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
-def body(method, params=None, *, rid=1, meta=True, token=None):
+def body(method, params=None, *, rid=1, meta=True, token=None, log_level=None):
     params = dict(params or {})
     if meta:
         params["_meta"] = {META_VER: PROTOCOL, META_CAPS: {}}
         if token is not None:
             params["_meta"]["progressToken"] = token
+        if log_level is not None:
+            params["_meta"][META_LOG] = log_level
     b = {"jsonrpc": "2.0", "method": method, "params": params}
     if rid is not None:
         b["id"] = rid
@@ -240,12 +242,13 @@ def main():
           [1]["result"]["structuredContent"], {"principal": {"sub": "real"}})
 
     print("— C2 guards on resources, prompts, and listings —")
-    check("guarded resource, anonymous -> 404", err(rpc("resources/read", {"uri": "secret://vault"})), (404, -32601))
+    check("guarded resource, anonymous -> 400/-32602, as if missing",
+          err(rpc("resources/read", {"uri": "secret://vault"})), (400, -32602))
     check("guarded resource, principal -> 200",
           rpc("resources/read", {"uri": "secret://vault"}, auth_hdr="Bearer good")[1]["result"]["contents"][0]["text"],
           "TOP SECRET")
-    check("guarded prompt, anonymous -> 404",
-          err(rpc("prompts/get", {"name": "secret_prompt", "arguments": {"topic": "t"}})), (404, -32601))
+    check("guarded prompt, anonymous -> 400/-32602, as if unknown",
+          err(rpc("prompts/get", {"name": "secret_prompt", "arguments": {"topic": "t"}})), (400, -32602))
     check("guarded prompt hidden from anonymous prompts/list",
           [p["name"] for p in rpc("prompts/list")[1]["result"]["prompts"]], [])
     check("guarded resource hidden from anonymous resources/list",
@@ -326,7 +329,7 @@ def main():
     print("— H9 templates are linear; bad coercion is -32602 —")
     long_uri = "event://" + "-" * 400 + "/"
     t0 = time.time(); s, _ = rpc("resources/read", {"uri": long_uri}); dt = time.time() - t0
-    check("400-byte non-matching URI -> 404 fast", (s, dt < 0.5), (404, True))
+    check("400-byte non-matching URI -> not found, fast", (s, dt < 0.5), (400, True))
     check("crash://abc -> 400/-32602", err(rpc("resources/read", {"uri": "crash://abc"})), (400, -32602))
     check("crash://42 still works", json.loads(rpc("resources/read", {"uri": "crash://42"})[1]["result"]["contents"][0]["text"]), {"id": 42})
 
@@ -376,7 +379,7 @@ def main():
 
             print("— H6 bad notification payload does not kill the stream —")
             frames = []
-            async with c.stream("POST", url, json=body("tools/call", {"name": "bad_note", "arguments": {}}),
+            async with c.stream("POST", url, json=body("tools/call", {"name": "bad_note", "arguments": {}}, log_level="info"),
                                 headers=HDRS("bad_note")) as r:
                 async for line in r.aiter_lines():
                     if line.startswith("data: "):
@@ -482,8 +485,8 @@ def medium():
     s, r = rpc("tools/list", raw=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}).encode())
     check("missing _meta -> -32602 naming both keys", (s, r["error"]["code"], META_VER in r["error"]["message"]),
           (400, -32602, True))
-    check("resources/read without uri -> 404, not a header complaint",
-          err(rpc("resources/read", {}, name=None)), (404, -32601))
+    check("resources/read without uri -> not found (-32602), not a header complaint",
+          err(rpc("resources/read", {}, name=None)), (400, -32602))
 
     print("— M10 Content-Type / CORS / Allow / Host —")
     check("Content-Type text/plain -> 400", err(rpc("tools/list", hdrs={"CONTENT-TYPE": "text/plain"})), (400, -32600))
@@ -1279,7 +1282,7 @@ def round3():
         srv = serve_uvicorn(bapp, port)
         frames = []
         async with httpx.AsyncClient(timeout=30) as c:
-            async with c.stream("POST", f"http://127.0.0.1:{port}/mcp", json=body("tools/call", {"name": "chatty", "arguments": {}}, token="t"),
+            async with c.stream("POST", f"http://127.0.0.1:{port}/mcp", json=body("tools/call", {"name": "chatty", "arguments": {}}, token="t", log_level="info"),
                                 headers=HDRS("chatty")) as r:
                 async for line in r.aiter_lines():
                     if line.startswith("data: "):

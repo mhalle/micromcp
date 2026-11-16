@@ -127,7 +127,8 @@ print(f"  call     -> {r['result']['structuredContent']}")
 check("call result", r["result"]["structuredContent"], {"street": "Washington", "since": 2020, "count": 11})
 s, r = rpc("tools/call", {"name": "protected", "arguments": {"x": 1}})
 print(f"  guard    -> HTTP {s} {r.get('error', {}).get('code')}")
-check("guard hides the tool from an anonymous caller (404/-32601)", (s, r["error"]["code"]), (404, -32601))
+check("guard hides the tool from an anonymous caller (400/-32602, as if unknown)",
+      (s, r["error"]["code"]), (400, -32602))
 
 # ══ What doesn't ═══════════════════════════════════════════════════════════
 print("\nNOW SUPPORTED")

@@ -3,6 +3,24 @@
 ## Unreleased
 
 ### Core
+- **Behavior change:** an unknown or guard-hidden tool (`tools/call`), prompt
+  (`prompts/get`), or resource (`resources/read`) is answered `400` with
+  `-32602`, as 2026-07-28 specifies (`Unknown tool: <name>`, `Unknown prompt:
+  <name>`, `Resource not found` with `data.uri`). It used to be `404` with
+  `-32601`, which the transport reserves for a method the server does not
+  implement and which a client may read as an unsupported method. Hidden and
+  missing entries still answer identically. A 2025-era request under
+  `legacy="stateless"` gets `-32002` for a missing resource, the code its
+  revision defined; unknown methods keep `404`/`-32601`. The dev host's
+  unknown-tool reply to widgets matches.
+- Log messages follow the request's `io.modelcontextprotocol/logLevel`, as
+  2026-07-28 requires. A request without it gets no `notifications/message`
+  (they used to go to every streaming call), one with it gets only messages
+  at or above that level, and an unknown or null level is `-32602`.
+  `Context.log()` raises `ValueError` for a level the spec does not define,
+  and `ctx.log_level` reports what the client asked for. 2025-era requests
+  under `legacy="stateless"` still get every message. New constants
+  `META_LOG` and `LOG_LEVELS`.
 - Skills over MCP (`io.modelcontextprotocol/skills`): `mcp.skill(path_or_files,
   prefix=, guards=, replace=)` serves an Agent Skill as `skill://` resources
   and answers `skills/list`, `skills/get`, and `resources/directory/read`.

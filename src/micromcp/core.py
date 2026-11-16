@@ -23,8 +23,9 @@ from urllib.parse import urlsplit
 
 from ._constants import (
     CANCEL_GRACE, CORS_HEADERS, HANDSHAKE_METHODS, HEADER_MISMATCH, INTERNAL_ERROR,
-    INVALID_PARAMS, INVALID_REQUEST, KEEPALIVE, LIST_METHODS, MAX_BODY, MAX_URI,
-    LEGACY_VERSIONS, META_CAPS, META_CLIENT, META_SERVER, META_SUB, META_VER, METHOD_NOT_FOUND,
+    INVALID_PARAMS, INVALID_REQUEST, KEEPALIVE, LIST_METHODS, LOG_LEVELS, MAX_BODY, MAX_URI,
+    LEGACY_VERSIONS, META_CAPS, META_CLIENT, META_LOG, META_SERVER, META_SUB, META_VER,
+    METHOD_NOT_FOUND,
     OFFLOAD_BYTES, PARSE_ERROR, PROTOCOL, QUEUE_SIZE, ROUTING_HEADERS, SINGLETON_HEADERS,
     DIRECTORY_MIME, SKILLS_EXT, STREAM_BUDGET, UNSUPPORTED_VERSION, WELL_KNOWN, WORKERS, log,
 )
@@ -399,6 +400,17 @@ def _loads(raw):
     return json.loads(raw, parse_constant=_not_json, parse_float=_finite)
 
 
+_LEGACY_RESOURCE_NOT_FOUND = -32002      # the 2025-11-25 code
+
+
+class _ResourceNotFound(Error):
+    """`resources/read` of a URI that is not served (or is hidden): -32602
+    with the URI in `data`, as 2026-07-28 shows; -32002 to a 2025-era client."""
+
+    def __init__(self, uri):
+        super().__init__(INVALID_PARAMS, "Resource not found", data={"uri": uri})
+
+
 class _Core:
     """Transport-neutral MCP logic: validate, dispatch, wrap.
 
@@ -588,7 +600,7 @@ class _Core:
         caps = {"tools": {"listChanged": False},
                 "resources": {"subscribe": False, "listChanged": False},
                 "prompts": {"listChanged": False},
-                "logging": {}}      # notifications/message on a streamed call
+                "logging": {}}      # notifications/message on a streamed call naming a logLevel
         ext = copy.deepcopy(self.mcp.extensions)
         if self.mcp.skills:
             ext[SKILLS_EXT] = {"directoryRead": True}
@@ -669,6 +681,9 @@ class _Core:
         info = (meta or {}).get(META_CLIENT)
         if info is not None and not isinstance(info, dict):
             raise Error(INVALID_PARAMS, f"_meta.{META_CLIENT} must be an object")
+        # Present means present: a null level is malformed, not a missing one.
+        if META_LOG in (meta or {}) and meta[META_LOG] not in LOG_LEVELS:
+            raise Error(INVALID_PARAMS, f"_meta.{META_LOG} must be one of {', '.join(LOG_LEVELS)}")
 
         if method in ("tools/call", "resources/read", "prompts/get"):
             # Bind the header to the field this method actually dispatches on;
@@ -805,7 +820,8 @@ class _Core:
             raise Error(INVALID_PARAMS, f"invalid arguments for tool {name!r}") from None
 
     # -- dispatch ---------------------------------------------------------
-    async def _dispatch(self, method, params, principal, emit=None, stop=None, bound=None):
+    async def _dispatch(self, method, params, principal, emit=None, stop=None, bound=None,
+                        era="modern"):
         """Async so handlers may be `async def`. Sync handlers run on the pool."""
         m = self.mcp
 
@@ -847,7 +863,11 @@ class _Core:
                 kwargs[entry["_principal"]] = principal
             if entry["_context"]:
                 meta = params.get("_meta") or {}
-                kwargs[entry["_context"]] = Context(emit, meta.get("progressToken"), stop, meta)
+                # 2026-07-28 sends log messages only to a request that names a
+                # level; a 2025-era request has no such field and gets them all.
+                level = meta.get(META_LOG) or (None if era == "modern" else LOG_LEVELS[0])
+                kwargs[entry["_context"]] = Context(emit, meta.get("progressToken"), stop, meta,
+                                                    log_level=level)
 
         if method == "server/discover":
             # Era negotiation. A modern client probes this FIRST; answering it
@@ -876,12 +896,12 @@ class _Core:
         if method == "tools/call":
             name = params.get("name")
             entry = m.tools.get(name)
-            if not entry:
-                raise Error(METHOD_NOT_FOUND, f"no such tool {name!r}", 404)
-            if not _allowed(entry, principal, strict=True):
-                # Indistinguishable from a tool that does not exist, as for
-                # resources and prompts: no existence oracle for hidden tools.
-                raise Error(METHOD_NOT_FOUND, f"no such tool {name!r}", 404)
+            # An unknown name is a bad parameter (-32602), not an unknown
+            # method: 404/-32601 is reserved for methods the server does not
+            # implement. A hidden tool answers exactly like a missing one, as
+            # for resources and prompts: no existence oracle.
+            if not entry or not _allowed(entry, principal, strict=True):
+                raise Error(INVALID_PARAMS, f"Unknown tool: {name}")
             kwargs = bound if bound is not None else await self._bind_call(params, principal, False)
             inject(entry, kwargs)
             try:
@@ -914,7 +934,7 @@ class _Core:
                 return {"contents": [read_contents(uri, held["data"], held["mime"])]}
             entry, raw = m._match(uri or "")
             if not entry or not _allowed(entry, principal, strict=True):
-                raise Error(METHOD_NOT_FOUND, f"no such resource {uri!r}", 404)
+                raise _ResourceNotFound(uri)
             kwargs = m.coerce_params(entry, uri, raw)   # after the guard: -32602 reveals it
             inject(entry, kwargs)
             try:
@@ -937,7 +957,7 @@ class _Core:
             name = params.get("name")
             entry = m.prompts.get(name)
             if not entry or not _allowed(entry, principal, strict=True):
-                raise Error(METHOD_NOT_FOUND, f"no such prompt {name!r}", 404)
+                raise Error(INVALID_PARAMS, f"Unknown prompt: {name}")
             args = dict(params.get("arguments") or {})
             declared = {a["name"] for a in entry["arguments"]}
             extra = sorted(set(args) - declared)
@@ -1115,7 +1135,11 @@ class _Core:
                             "MCP clients cannot start OAuth from a bare challenge")
             hdrs = ([h for h in hdrs if h[0].lower() != "www-authenticate"]
                     + e.challenge(self.metadata_url))
-        return _err(status, rid, e.code, e.message, e.data, headers=hdrs)
+        # 2025-11-25 named a missing resource -32002; a 2025-era client gets
+        # its own era's code (2026-07-28 clients accept both).
+        code = (_LEGACY_RESOURCE_NOT_FOUND if era == "legacy" and isinstance(e, _ResourceNotFound)
+                else e.code)
+        return _err(status, rid, code, e.message, e.data, headers=hdrs)
 
     async def respond(self, req, emit=None, stop=None, headers=None):
         """Dispatch a prepared request. Returns (status_code, payload)."""
@@ -1129,7 +1153,8 @@ class _Core:
                     # Modern methods without the envelope: not a 2025 method.
                     raise Error(METHOD_NOT_FOUND, f"unknown method {method!r}", 404)
                 else:
-                    result = await self._dispatch(method, params, principal, emit, stop, bound)
+                    result = await self._dispatch(method, params, principal, emit, stop, bound,
+                                                  era)
                 # A 2025-era result: no resultType/ttlMs/cacheScope, and the
                 # server identifies itself in initialize, not in every _meta.
                 # The response names the era actually served.
