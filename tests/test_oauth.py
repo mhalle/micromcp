@@ -213,7 +213,7 @@ s, j, h = tool(capp, "both", None)
 check("two scope guards answer one 403 naming both scopes",
       (s, 'scope="a:write b:delete"' in h.get("www-authenticate", "")), (403, True))
 check("... while a guard that plainly denies still hides the tool", tool(capp, "refused", None)[0],
-      404)
+      400)
 
 print("a refused version is answered by authentication first (core)")
 INIT = {"jsonrpc": "2.0", "id": 1, "method": "initialize",

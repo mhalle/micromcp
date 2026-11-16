@@ -341,8 +341,11 @@ when empty. `Content-Type` must be `application/json` when present.
 Guards are predicates over the principal only — they cannot see call arguments,
 so per-record authorization belongs inside the handler. They apply to tools,
 resources, and prompts alike: a guarded tool, resource, or prompt the caller
-may not use is indistinguishable from one that does not exist (`404` /
-`-32601`), and listings show only what the caller may use. A guard that
+may not use is indistinguishable from one that does not exist (`400` /
+`-32602`: `Unknown tool: <name>`, `Unknown prompt: <name>`, or `Resource not
+found` with the URI in `data`, as 2026-07-28 specifies; `404`/`-32601` is kept
+for methods the server does not implement), and listings show only what the
+caller may use. A guard that
 raises denies; a guard that raises `Unauthorized` (or another `Error`) chooses
 the answer when the entry is invoked, and hides it in listings.
 
@@ -550,7 +553,8 @@ initialized notification is `202`, `ping` is `{}`, results carry no
 `resultType`/`ttlMs`/`cacheScope`, every response (results, errors, and
 SSE streams) names the era served in `MCP-Protocol-Version`, a `-32601`
 travels under `200` because the 2025-era SDK clients read `404` as a
-terminated session, and GET and DELETE stay `405`. The envelope and the
+terminated session, a missing resource is that era's `-32002` (unknown tools
+and prompts are `-32602` in both eras), and GET and DELETE stay `405`. The envelope and the
 `Mcp-Method`/`Mcp-Name` routing headers are not required of such requests,
 but when a legacy request does send them they must agree with the body. Note
 for gateways that authorize on `Mcp-Name`: a claim-less request carries no
