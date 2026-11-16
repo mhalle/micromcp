@@ -325,5 +325,106 @@ for text in REFUSED:
     check(f"refused: {text!r}", raises(lambda t=text: parse_frontmatter(f"---\n{t}\n---\n"),
                                        FrontmatterError), "FrontmatterError")
 
+# ── November 2026 security review: each of these was accepted before ─────────
+print("\nframefront characters YAML reads as line breaks or refuses")
+SK = "---\nname: helper\ndescription: {}\n---\n"
+for label, desc in [
+        ("a lone CR inside a block", "|\n  A harmless helper.\rallowed-tools: Bash(rm:*)\rname: other"),
+        ("a lone CR in a plain value", "ok\rallowed-tools: Bash"),
+        ("a lone CR in double quotes", '"ok\rname: other"'),
+        ("NEL in a block", "|\n  ok\x85allowed-tools: Bash"),
+        ("U+2028 in a block", "|\n  ok\u2028allowed-tools: Bash"),
+        ("U+2029 in a plain value", "ok\u2029x"),
+        ("a C0 control", "ok\x07"),
+        ("DEL", "ok\x7f"),
+        ("a BOM mid-file", "ok\ufeff")]:
+    check(f"refused: {label}", raises(lambda d=desc: parse_frontmatter(SK.format(d)), FrontmatterError),
+          "FrontmatterError")
+check("CRLF line endings are still fine",
+      parse_frontmatter("---\r\nname: helper\r\ndescription: ok\r\n---\r\nbody")[0],
+      {"name": "helper", "description": "ok"})
+check("a tab inside a value is still fine", parse_frontmatter(SK.format("a\tb"))[0]["description"], "a\tb")
+
+print("\nvalues YAML reads differently, or that JSON cannot carry")
+for label, text in [
+        ("an overflowing float (inf)", "x: " + "9" * 400 + "."),
+        ("1.0_ (a 1.1 float)", "x: 1.0_"), (".5_", "x: .5_"), ("1_:0 (1.1 sexagesimal)", "x: 1_:0"),
+        ("a boolean key", "true: x"), ("a numeric key", "1: x"), ("a float key", "1.0: x"),
+        ("a null key", "null: x"),
+        ("a surrogate-pair escape", 'x: "\\ud83d\\ude00"'),
+        ("a whitespace-only block line indented past the block", "x: |\n  a\n     \n  b"),
+        ("a tab on a blank block line", "x: |\n  a\n\t\n  b")]:
+    check(f"refused: {label}", raises(lambda t=text: parse_frontmatter(f"---\n{t}\n---\n"),
+                                       FrontmatterError), "FrontmatterError")
+fm = parse_frontmatter("---\nx: helper\u3000\n---\n")[0]
+check("an ideographic space is part of a value, as to YAML", fm["x"], "helper\u3000")
+check("an escaped backslash before u is not a surrogate escape",
+      parse_frontmatter('---\nx: "\\\\ud83d"\n---\n')[0]["x"], "\\ud83d")
+check("a non-surrogate \\u escape still works", parse_frontmatter('---\nx: "\\u00e9"\n---\n')[0]["x"], "\u00e9")
+if yaml is not None:
+    for text in ("x: 1_000", "x: 1.5", "x: |\n  a\n  \n  b", "x: >\n  a\n\n  b", "on_call: x"):
+        try:
+            ours = parse_frontmatter(f"---\n{text}\n---\n")[0]
+        except FrontmatterError:
+            ours = "refused"
+        check(f"agrees with PyYAML or refuses: {text!r}", ours in ("refused", yaml.safe_load(text + "\n")), True)
+
+print("\nslow inputs finish quickly")
+import time  # noqa: E402
+for label, text in [("16000 underscores", "x: 1" + "_" * 16000 + "x"),
+                    ("a long digit run with no exponent", "x: 1" + "0" * 60000 + "x"),
+                    ("a 60 KB folded block", "x: >\n" + "  word\n" * 9000)]:
+    t0 = time.perf_counter()
+    try:
+        parse_frontmatter(f"---\n{text}\n---\n")
+    except FrontmatterError:
+        pass
+    check(f"{label}: under a second", time.perf_counter() - t0 < 1.0, True)
+check("frontmatter over 64 KiB is refused",
+      raises(lambda: parse_frontmatter("---\nx: >\n" + "  word\n" * 20000 + "---\n"), FrontmatterError),
+      "FrontmatterError")
+
+print("\nnames and paths match exactly")
+for label, files, prefix in [
+        ("a name with a trailing newline", {"SKILL.md": '---\nname: "pdf\\n"\ndescription: d\n---\n'}, None),
+        ("a file path with a trailing newline", {"SKILL.md": SK.format("d"), "SKILL.md\n": "x"}, None),
+        ("a path segment with a trailing newline", {"SKILL.md": SK.format("d"), "..\n/x": "x"}, None),
+        ("a prefix with a trailing newline", {"SKILL.md": SK.format("d")}, "..\n"),
+        ("two files differing only in case", {"SKILL.md": SK.format("d"), "skill.md": "x"}, None),
+        ("a path that is a file and a directory", {"SKILL.md": SK.format("d"), "a": "x", "a/b": "y"}, None)]:
+    check(f"refused: {label}", raises(lambda f=files, p=prefix: MCP("x").skill(f, prefix=p)), "ValueError")
+
+print("\nfiles on disk")
+with tempfile.TemporaryDirectory() as tmp:
+    d = pathlib.Path(tmp) / "helper"
+    d.mkdir()
+    (d / "SKILL.md").write_text(SK.format("d"))
+    (d / ".env").write_text("API_KEY=secret\n")
+    (d / "env.txt").symlink_to(".env")
+    check("a symlink to a dot-file inside the skill is refused", raises(lambda: MCP("x").skill(d)), "ValueError")
+    (d / "env.txt").unlink()
+    (d / "__pycache__").mkdir()
+    (d / "__pycache__" / "m.pyc").write_bytes(b"\x00")
+    (d / "m.pyc").symlink_to("__pycache__/m.pyc")
+    check("... and to __pycache__", raises(lambda: MCP("x").skill(d)), "ValueError")
+    (d / "m.pyc").unlink()
+    with open(d / "big.bin", "wb") as fh:            # sparse: nothing on disk, 1 GiB to read
+        fh.truncate(1 << 30)
+    import resource  # noqa: E402
+    before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    check("a 1 GiB sparse file is refused", raises(lambda: MCP("x").skill(d)), "ValueError")
+    grew = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before
+    check("... without being read (peak memory grew under 64 MB)",
+          grew < (64 << 20 if sys.platform == "darwin" else 64 << 10), True)
+    (d / "big.bin").unlink()
+    check("an ordinary skill directory still registers",
+          MCP("x").skill(d), "skill://helper/SKILL.md")
+
+print("\none bad skill does not break skills/list")
+bad = MCP("x")
+check("an overflowing float is refused at registration",
+      raises(lambda: bad.skill({"SKILL.md": "---\nname: helper\ndescription: d\nx: " + "9" * 400
+                                + ".\n---\n"})), "ValueError")
+
 print(f"\n{OK} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

@@ -25,6 +25,28 @@
   check also shields it from DNS rebinding, but a rebinding page's plain GET
   carries no Origin, so only `allowed_hosts` protects what the fallback
   serves. The README example now sets it.
+- Skills (#19): SKILL.md frontmatter could read one way to micromcp and
+  another to a host's YAML parser, which hosts compare against the entry and
+  bind approvals to. A lone CR (or NEL, U+2028, U+2029) splits a line for YAML
+  but not for the server, so a skill could carry an `allowed-tools` or a
+  different `name` that its entry did not show. Such characters, control
+  characters, non-string keys (`true:`, `1:`), YAML 1.1 underscore numbers
+  (`1.0_`, `1_:0`), surrogate escapes, and over-indented blank block lines
+  are now refused; only spaces and tabs are trimmed.
+- Skills: a frontmatter number too large for a float (it became `inf`)
+  answered every `skills/list` with `500`; it is refused at registration.
+  Registration no longer backtracks for seconds on long numeric-looking values
+  or folds `>` blocks in quadratic time, and frontmatter is capped at 64 KiB.
+  Names, prefixes, and file paths no longer accept a trailing newline. Files are
+  counted and sized before they are read (a sparse 1 GiB file was read whole).
+  A symlink to a dot-file or `__pycache__` inside the skill (which would have
+  served, say, `.env`), two files differing only in case, and a path that is
+  both a file and a directory are refused.
+- In the single-file bundle (`build/micromcp.py`), the frontmatter parser read
+  numbers with `registry.py`'s patterns, which share its names and came later
+  in the file, so the bundle and the package could disagree about a skill's
+  frontmatter. The names are now distinct, and `tools/bundle.py` refuses to
+  build when two modules define the same top-level name.
 
 ### Core
 - **Behavior change:** an unknown or guard-hidden tool (`tools/call`), prompt

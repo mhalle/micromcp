@@ -64,10 +64,29 @@ def build() -> str:
         out.append(f"\n# {'=' * 76}\n# {name}.py\n# {'=' * 76}\n")
         out.append(src.strip("\n") + "\n")
     text = "".join(out)
+    tree = ast.parse(text)
     # A relative import that survived would only fail at call time; refuse now.
-    for node in ast.walk(ast.parse(text)):
+    for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.level > 0:
             raise SystemExit(f"bundle: relative import left at line {node.lineno}")
+    # Modules share one namespace here: a name two of them define at top level
+    # silently becomes the later one for both (skills.py once parsed numbers
+    # with registry.py's patterns this way).
+    seen: dict[str, int] = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names = [node.name]
+        elif isinstance(node, ast.Assign):
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names = [node.target.id]
+        else:
+            continue
+        for n in names:
+            if n in seen and n != "__all__":
+                raise SystemExit(f"bundle: {n!r} is defined at lines {seen[n]} and "
+                                 f"{node.lineno}; rename one, since in one file the later wins")
+            seen[n] = node.lineno
     return text
 
 
