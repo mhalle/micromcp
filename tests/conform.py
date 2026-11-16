@@ -10,26 +10,31 @@ from mcp_types.methods import (validate_server_result, validate_client_request,
                                parse_server_notification)
 from micromcp import MCP, Server, PROTOCOL, META_VER, META_CAPS
 
-# A declared extension and a skill, so discover's capabilities.extensions and
-# the SKILL.md listing are checked against the strict schema too.
-mcp = MCP("newton-crashes", "0.1.0", extensions={"io.modelcontextprotocol/ui": {}})
+# Every optional identity field and icon is set, and the server declares an
+# extension and serves a skill, so the strict schema checks serverInfo, each
+# listing, discover's capabilities.extensions, and the SKILL.md listing.
+ICON = [{"src": "https://example.com/icon.png", "mimeType": "image/png", "sizes": ["48x48"],
+         "theme": "light"}]
+mcp = MCP("newton-crashes", "0.1.0", title="Newton crashes", description="Crash data for Newton",
+          website_url="https://example.com", icons=ICON,
+          extensions={"io.modelcontextprotocol/ui": {}})
 mcp.skill({"SKILL.md": "---\nname: crash-review\ndescription: Review a street's crashes\n---\n",
            "references/fields.md": "street, year\n"})
 
-@mcp.tool
+@mcp.tool(icons=ICON)
 def severity_breakdown(street: str | None = None) -> dict:
     """Count crashes by severity."""
     return {"street": street or "all", "counts": {"pdo": 7}}
 
-@mcp.resource("schema://crash", mime_type="application/json")
+@mcp.resource("schema://crash", mime_type="application/json", icons=ICON)
 def crash_schema() -> str:
     return json.dumps({"fields": ["street"]})
 
-@mcp.resource("crash://{crash_id}")
+@mcp.resource("crash://{crash_id}", icons=ICON)
 def one_crash(crash_id: int) -> str:
     return json.dumps({"id": crash_id})
 
-@mcp.prompt
+@mcp.prompt(icons=ICON)
 def summarize(topic: str) -> str:
     """Summarize a topic."""
     return f"Please summarize: {topic}"

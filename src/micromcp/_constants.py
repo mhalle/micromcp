@@ -23,6 +23,12 @@ LOG_LEVELS = ("debug", "info", "notice", "warning", "error", "critical", "alert"
 # it mandated JSON-RPC batch arrays, which this server refuses.
 LEGACY_VERSIONS = ("2025-11-25", "2025-06-18")
 WELL_KNOWN = "/.well-known/oauth-protected-resource"   # RFC 9728
+# Server Cards (extension io.modelcontextprotocol/server-card): served at the
+# MCP endpoint's URL plus this suffix, as this media type, citing this schema.
+SERVER_CARD = "/server-card"
+SERVER_CARD_MIME = "application/mcp-server-card+json"
+SERVER_CARD_SCHEMA = "https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json"
+
 # Skills over MCP: the extension identifier, the MIME type of a directory
 # resource, and the per-skill limits every conforming host accepts.
 SKILLS_EXT = "io.modelcontextprotocol/skills"

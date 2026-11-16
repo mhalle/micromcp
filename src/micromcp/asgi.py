@@ -41,8 +41,10 @@ class ASGIServer(_Core):
 
         async def reply(status, payload, extra=()):
             status, data = _encode(status, payload)
-            hdrs = [(b"content-length", str(len(data)).encode())]
-            if data:
+            # A 304's length would be the 200's, so it sends none; an answer
+            # that names its own Content-Type (the Server Card) keeps it.
+            hdrs = [] if status == 304 else [(b"content-length", str(len(data)).encode())]
+            if data and not any(k.lower() == "content-type" for k, _ in extra):
                 hdrs.insert(0, (b"content-type", b"application/json"))
             if http_method == "HEAD":                 # same head as GET, no body
                 data = b""
@@ -53,7 +55,7 @@ class ASGIServer(_Core):
 
         early = self.reject_duplicates({n for n in names if names.count(n) > 1})
         if early is None:
-            early = self.well_known(http_method, scope.get("path", "/"), headers)
+            early = self.document(http_method, scope.get("path", "/"), headers)
         if early is None and not self.path_ok(scope.get("path", "/")):
             early = _err(404, None, INVALID_REQUEST, "no MCP endpoint at this path")
         try:

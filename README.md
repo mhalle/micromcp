@@ -156,6 +156,62 @@ what tool descriptions can't say on their own, such as how the tools fit
 together. It is one string for every caller: discover is answered before any
 tool is called and may be cached by the client.
 
+## Server identity and Server Cards
+
+```python
+mcp = MCP("newton-civic", "1.0.0",
+          title="Newton civic data",
+          description="Crash and permit data for Newton, MA",
+          website_url="https://example.com/newton",
+          icons=[{"src": "https://example.com/newton.png", "mimeType": "image/png",
+                  "sizes": ["48x48"]}])
+
+@mcp.tool(icons=[{"src": "https://example.com/crash.svg", "mimeType": "image/svg+xml",
+                  "sizes": ["any"]}])
+def crash_count(street: str) -> dict: ...
+```
+
+These are how hosts present a server to people: a display name, one sentence on
+what it is for, a link, and icons. They go out in `serverInfo` beside `name` and
+`version` (in every result's `_meta`, and in `initialize` under
+`legacy="stateless"`), and are left out when unset. An icon's `src` is an
+http(s) URL or a base64 `data:` URI; `mimeType`, `sizes` (`"48x48"`, `"any"`),
+and `theme` (`"light"` or `"dark"`) are optional. `icons=` also works on
+`@mcp.tool`, `@mcp.resource` (templates included), and `@mcp.prompt`. All of it
+is checked when the server or entry is defined: a misspelled key, a size like
+`"48"`, or a `javascript:` URL raises there instead of being ignored by a host.
+
+A **Server Card** (the `io.modelcontextprotocol/server-card` extension, Beta)
+is a public JSON document that tells a client where and how to connect before
+it connects, so a registry or an IDE can index and configure the server:
+
+```python
+app = ASGIServer(mcp, path="/mcp",
+                 server_card={"url": "https://mcp.example.com/mcp",       # this endpoint, public
+                              "name": "com.example/newton-civic",         # reverse-DNS namespace/name
+                              "repository": {"url": "https://github.com/example/newton",
+                                             "source": "github"}})        # optional
+```
+
+The card is served at `<url>/server-card` (here `/mcp/server-card`) as
+`application/mcp-server-card+json`. Everything but `url`, `name`, and
+`repository` comes from the registry, so the card cannot disagree with what
+the server says once connected: version, title, description, website and
+icons from `MCP(...)`, and `supportedProtocolVersions` from what the server
+serves (both eras under `legacy="stateless"`). `MCP(description=...)` is
+required, at most 100 characters, and the version must be one version, not a
+range. The card is answered before authentication and guards, since it holds
+public metadata only; the `allowed_hosts` check still applies. It is readable
+from any origin (`Access-Control-Allow-Origin: *`), cached for an hour, and
+carries an `ETag`, so a client revalidating with `If-None-Match` gets an empty
+`304`. As with `resource_metadata=`, `url` is the operator's configuration,
+never derived from `Host` or a proxy header; a `url` whose path differs from
+`path=` is logged as a warning, since the card is served under the `url`'s path.
+Primitives (tools, resources, prompts) are deliberately not in a card: clients
+still list them after connecting. Domain-wide discovery, an AI Catalog at
+`/.well-known/ai-catalog.json` that links to cards, belongs to the site rather
+than to one MCP server, and is not served here.
+
 ## Skills
 
 ```python
@@ -530,7 +586,7 @@ format:
 
 | Group | Names |
 |---|---|
-| Protocol | `PROTOCOL` (`"2026-07-28"`), `LEGACY_VERSIONS`, `WELL_KNOWN` |
+| Protocol | `PROTOCOL` (`"2026-07-28"`), `LEGACY_VERSIONS`, `WELL_KNOWN`, `SERVER_CARD`, `SERVER_CARD_MIME`, `SERVER_CARD_SCHEMA` |
 | Skills | `SKILLS_EXT`, `DIRECTORY_MIME`, `SKILL_MAX_FILES`, `SKILL_MAX_BYTES` |
 | `_meta` keys | `META_VER`, `META_CAPS`, `META_CLIENT`, `META_SERVER`, `META_SUB`, `META_LOG` (and its `LOG_LEVELS`) |
 | Error codes | `PARSE_ERROR`, `INVALID_REQUEST`, `METHOD_NOT_FOUND`, `INVALID_PARAMS`, `INTERNAL_ERROR`, `HEADER_MISMATCH`, `UNSUPPORTED_VERSION`, `UNAUTHORIZED` |
@@ -645,7 +701,8 @@ on ephemeral ports. Ports and servers are never shared between suites.
 ```
 test_micromcp.py    29 unit assertions, stdlib only
 conform.py          12 checks against the strict mcp-types wire schema
-test_skills.py      107 checks: skills, directory reads, the frontmatter subset (against PyYAML)
+test_identity.py    74 checks: identity fields, icons, the Server Card on both transports
+test_skills.py      108 checks: skills, directory reads, the frontmatter subset (against PyYAML)
 interop.py          end-to-end with the official mcp client, 9 assertions
 test_asgi.py        native ASGI under uvicorn and mounted in Starlette
 test_progress.py    40 SSE checks: ordering, cancellation, subscriptions/listen, WSGI degradation

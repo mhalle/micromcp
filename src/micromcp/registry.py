@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import copy
 import datetime
 import inspect
 import json
 import re
+from urllib.parse import urlsplit
 
 from ._constants import _NAME_RE, INVALID_PARAMS, SKILLS_EXT, log
 
@@ -96,6 +98,63 @@ def _annotations_ok(ann, what: str) -> dict:
             raise ValueError(f"{what} annotations: lastModified must be an ISO 8601 "
                              f"string or a datetime") from None
         out["lastModified"] = lm
+    return out
+
+
+def _http_url_ok(url, what: str) -> str:
+    """An absolute http(s) URL, as the schema's `format: uri` fields expect
+    of a link a client will follow; anything else fails at registration."""
+    if not isinstance(url, str):
+        raise TypeError(f"{what} must be a string")
+    u = urlsplit(url)
+    if u.scheme not in ("http", "https") or not u.netloc \
+            or any(ord(c) < 0x21 or ord(c) > 0x7E for c in url):
+        raise ValueError(f"{what} must be an absolute http(s) URL, got {url!r}")
+    return url
+
+
+_ICON_SIZE_RE = re.compile(r"^(?:[1-9][0-9]*x[1-9][0-9]*|any)$")
+
+
+def _icons_ok(icons, what: str) -> list:
+    """Validate an `icons` list (src, mimeType, sizes, theme) and return a
+    detached copy. `src` is an http(s) URL or a base64 `data:` URI, the two
+    forms the spec names; a hand-typed key or size fails here, not in a host."""
+    if not isinstance(icons, (list, tuple)) or not icons:
+        raise ValueError(f"{what} icons must be a non-empty list of dicts")
+    out = []
+    for icon in icons:
+        if not isinstance(icon, dict):
+            raise ValueError(f"{what} icons must be dicts, got {icon!r}")
+        unknown = sorted(str(k) for k in icon if k not in ("src", "mimeType", "sizes", "theme"))
+        if unknown:
+            raise ValueError(f"{what} icon: unknown key(s) {unknown} "
+                             f"(expected src, mimeType, sizes, theme)")
+        src = icon.get("src")
+        if not isinstance(src, str):
+            raise ValueError(f"{what} icon: src must be a string")
+        if src.startswith("data:"):
+            if "," not in src or not src.split(",", 1)[0].endswith(";base64"):
+                raise ValueError(f"{what} icon: a data: src must be base64 "
+                                 f"(data:<type>;base64,...)")
+        else:
+            _http_url_ok(src, f"{what} icon src")
+        item = {"src": src}
+        if "mimeType" in icon:
+            if not isinstance(icon["mimeType"], str) or "/" not in icon["mimeType"]:
+                raise ValueError(f"{what} icon: mimeType must be a MIME type such as 'image/png'")
+            item["mimeType"] = icon["mimeType"]
+        if "sizes" in icon:
+            sizes = icon["sizes"]
+            if not isinstance(sizes, (list, tuple)) \
+                    or not all(isinstance(s, str) and _ICON_SIZE_RE.match(s) for s in sizes):
+                raise ValueError(f"{what} icon: sizes must be a list like ['48x48', 'any']")
+            item["sizes"] = list(sizes)
+        if "theme" in icon:
+            if icon["theme"] not in ("light", "dark"):
+                raise ValueError(f"{what} icon: theme must be 'light' or 'dark'")
+            item["theme"] = icon["theme"]
+        out.append(item)
     return out
 
 
@@ -216,6 +275,12 @@ class MCP:
                   as a whole (clients may put it in a system prompt). Sent in
                   `server/discover`, and in `initialize` under legacy serving.
                   Say what tool descriptions cannot: how the tools fit together.
+    title, description, website_url, icons
+                  how hosts present the server to people: a display name, a
+                  sentence on what it is for, a link, and icons (dicts with
+                  `src` and optionally `mimeType`, `sizes`, `theme`). Published
+                  in `serverInfo` beside `name` and `version`, and used by a
+                  Server Card.
     extensions    {identifier: settings} for extensions this server supports,
                   published as `capabilities.extensions` (e.g.
                   `{"io.modelcontextprotocol/ui": {}}`). Skills declare theirs
@@ -223,11 +288,17 @@ class MCP:
     """
 
     def __init__(self, name: str, version: str = "0.1.0", *, instructions: str | None = None,
-                 extensions: dict | None = None):
-        if instructions is not None and not isinstance(instructions, str):
-            raise TypeError("instructions must be a string")
+                 title: str | None = None, description: str | None = None,
+                 website_url: str | None = None, icons=None, extensions: dict | None = None):
+        for label, value in (("instructions", instructions), ("title", title),
+                             ("description", description)):
+            if value is not None and not isinstance(value, str):
+                raise TypeError(f"{label} must be a string")
         self.name, self.version = name, version
         self.instructions = instructions
+        self.title, self.description = title, description
+        self.website_url = None if website_url is None else _http_url_ok(website_url, "website_url")
+        self.icons = None if icons is None else _icons_ok(icons, "server")
         self.extensions = {} if extensions is None else _extensions_ok(extensions)
         self.tools: dict[str, dict] = {}
         self.resources: dict[str, dict] = {}
@@ -236,10 +307,20 @@ class MCP:
         self.skills: dict[str, dict] = {}        # SKILL.md URI -> skill record
         self.skill_files: dict[str, dict] = {}   # file URI -> {data, mime, skills}
 
+    def server_info(self) -> dict:
+        """The `Implementation` object clients see as `serverInfo`: name and
+        version, plus whichever optional identity fields are set."""
+        info = {"name": self.name, "version": self.version}
+        for key, value in (("title", self.title), ("description", self.description),
+                           ("websiteUrl", self.website_url), ("icons", self.icons)):
+            if value is not None:
+                info[key] = copy.deepcopy(value)
+        return info
+
     def tool(self, fn=None, *, name=None, title=None, guards=(),
              annotations=None, output_schema=None, read_only=None,
              destructive=None, idempotent=None, replace=False, meta=None,
-             visibility=None):
+             visibility=None, icons=None):
         """Register a tool.
 
         title       human-readable label for UIs
@@ -257,6 +338,8 @@ class MCP:
                     default). An app-only tool is hidden from the model by
                     the host and callable by the server's widgets; it is still
                     an ordinary tool to any other client, so guard it.
+        icons       for host UIs: dicts with `src` (an http(s) URL or a base64
+                    `data:` URI) and optionally `mimeType`, `sizes`, `theme`
 
         Arguments are validated against the generated schema and converted to
         the declared Python types (dates, enums, sets, dataclasses, pydantic
@@ -281,6 +364,8 @@ class MCP:
                 entry["title"] = title
             if ann:
                 entry["annotations"] = ann
+            if icons is not None:
+                entry["icons"] = _icons_ok(icons, f"tool {n!r}")
             if meta:
                 entry["_meta_out"] = _meta_ok(meta, f"tool {n!r}")
             if visibility is not None:
@@ -303,7 +388,7 @@ class MCP:
         return wrap(fn) if fn else wrap
 
     def resource(self, uri: str, *, mime_type=None, title=None, guards=(),
-                 replace=False, meta=None, annotations=None):
+                 replace=False, meta=None, annotations=None, icons=None):
         """Register a resource. A `{braced}` segment makes it a template:
 
             @mcp.resource("crash://{crash_id}")
@@ -316,8 +401,8 @@ class MCP:
         evaluated on read and on listing, before any parameter is parsed; a
         denied resource is indistinguishable from a missing one. `meta` is
         published as `_meta` in listings and on the read contents.
-        `annotations` (audience, priority, lastModified) are published in
-        listings.
+        `annotations` (audience, priority, lastModified) and `icons` (as for
+        tools) are published in listings.
 
         `mime_type` defaults to `text/plain`, or to `text/html;profile=mcp-app`
         for a `ui://` URI (an MCP App widget). Widgets are fetched by the host
@@ -345,6 +430,8 @@ class MCP:
                 entry["_meta_out"] = _meta_ok(meta, f"resource {uri!r}")
             if annotations is not None:
                 entry["annotations"] = _annotations_ok(annotations, f"resource {uri!r}")
+            if icons is not None:
+                entry["icons"] = _icons_ok(icons, f"resource {uri!r}")
             registry = self.templates if rx is not None else self.resources
             if uri in self.skill_files:
                 raise ValueError(f"resource {uri!r} is a file of a registered skill")
@@ -360,10 +447,11 @@ class MCP:
         return wrap
 
     def prompt(self, fn=None, *, name=None, title=None, guards=(), replace=False,
-               meta=None):
+               meta=None, icons=None):
         """Register a prompt. Arguments arrive as strings and are coerced to the
         handler's `int`/`float`/`bool` hints; `Principal`/`Context` parameters
-        are injected exactly as for tools."""
+        are injected exactly as for tools, and `icons` are published as for
+        tools."""
         def wrap(f):
             n = _wire_name("prompt", name, f, self.prompts, replace)
             desc, docs = _parse_doc(inspect.getdoc(f))
@@ -382,6 +470,8 @@ class MCP:
                      "_principal": inject["principal"], "_context": inject["context"]}
             if title:
                 entry["title"] = title
+            if icons is not None:
+                entry["icons"] = _icons_ok(icons, f"prompt {n!r}")
             if meta:
                 entry["_meta_out"] = _meta_ok(meta, f"prompt {n!r}")
             self.prompts[n] = entry
