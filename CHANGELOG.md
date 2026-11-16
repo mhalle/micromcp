@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-11-16
+
+A security release. A November 2026 adversarial review found that an
+`async def` guard let every caller in, that `allowed_hosts` accepted a
+crafted Host value, and that a guard-hidden resource could shadow a visible
+template; these and the review's other findings are fixed below, several
+dating to 0.1.0. **Upgrade if you use async guards or `allowed_hosts`.** New
+too: server instructions, Server Cards and identity metadata, Skills over
+MCP, declared extensions, content-block helpers with annotations, and
+`fallback=` for serving another app beside the MCP endpoint. **Behavior
+change:** an unknown tool, prompt, or resource is now `400`/`-32602`, as the
+spec says, not `404`/`-32601` (see Core).
 
 ### Security
 - **An `async def` guard always allowed.** A guard's return value was judged
