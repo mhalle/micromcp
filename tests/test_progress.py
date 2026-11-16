@@ -5,7 +5,8 @@ where the client abstracts away what we need to assert.
 """
 import asyncio, io, json, socket, threading, time
 import httpx
-from micromcp import MCP, Server, ASGIServer, Context, PROTOCOL, META_VER, META_CAPS, META_SUB
+from micromcp import (MCP, Server, ASGIServer, Context, PROTOCOL, META_VER, META_CAPS, META_LOG,
+                      META_SUB)
 from _helpers import free_port
 
 mcp = MCP("demo", "0.1.0")
@@ -33,6 +34,21 @@ async def forever(ctx: Context = None) -> dict:
     except asyncio.CancelledError:
         CANCELLED.set()
         raise
+
+
+@mcp.tool
+async def levels(ctx: Context = None) -> dict:
+    """One message at each of three levels."""
+    for level in ("debug", "warning", "error"):
+        await ctx.log(level, level)
+    return {"level": ctx.log_level}
+
+
+@mcp.tool
+async def misspelt(ctx: Context = None) -> dict:
+    """Logs at a level the spec does not have."""
+    await ctx.log("warn", "oops")
+    return {"unreachable": True}
 
 
 @mcp.tool
@@ -72,10 +88,12 @@ def serve(app, port):
     return srv
 
 
-def req_body(tool, args=None, token=None):
+def req_body(tool, args=None, token=None, log_level=None):
     meta = {META_VER: PROTOCOL, META_CAPS: {}}
     if token is not None:
         meta["progressToken"] = token
+    if log_level is not None:
+        meta[META_LOG] = log_level
     return {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {"name": tool, "arguments": args or {}, "_meta": meta}}
 
@@ -86,11 +104,11 @@ HDRS = lambda tool: {"Content-Type": "application/json",
                      "Mcp-Method": "tools/call", "Mcp-Name": tool}
 
 
-async def read_sse(url, tool, args=None, token=None, stop_after=None):
+async def read_sse(url, tool, args=None, token=None, stop_after=None, log_level=None):
     """Collect SSE frames. If stop_after is set, hang up after N frames."""
     frames = []
     async with httpx.AsyncClient(timeout=30) as c:
-        async with c.stream("POST", url, json=req_body(tool, args, token),
+        async with c.stream("POST", url, json=req_body(tool, args, token, log_level),
                             headers=HDRS(tool)) as r:
             ctype = r.headers.get("content-type", "")
             async for line in r.aiter_lines():
@@ -107,7 +125,8 @@ async def main():
     url = f"http://127.0.0.1:{port}/mcp"
 
     print("— streaming shape —")
-    ctype, frames, hdrs = await read_sse(url, "crunch", {"steps": 5}, token="p1")
+    ctype, frames, hdrs = await read_sse(url, "crunch", {"steps": 5}, token="p1",
+                                         log_level="info")
     check("content-type is SSE", ctype.split(";")[0], "text/event-stream")
     check("x-accel-buffering set", hdrs.get("x-accel-buffering"), "no")
     progress = [f for f in frames if f.get("method") == "notifications/progress"]
@@ -126,15 +145,37 @@ async def main():
     check("final payload", results[0]["result"]["structuredContent"], {"processed": 5})
 
     print("\n— client sends no progressToken —")
-    ctype, frames, _ = await read_sse(url, "crunch", {"steps": 3})
+    ctype, frames, _ = await read_sse(url, "crunch", {"steps": 3}, log_level="info")
     check("still SSE", ctype.split(";")[0], "text/event-stream")
     check("no progress frames", [f for f in frames
                                  if f.get("method") == "notifications/progress"], [])
-    # Logging carries no token, so it is unaffected by the client not opting in.
+    # Logging is opted into by logLevel, not by the progress token.
     check("log frames still flow", len([f for f in frames
                                         if f.get("method") == "notifications/message"]), 1)
     check("result still delivered", frames[-1]["result"]["structuredContent"],
           {"processed": 3})
+
+    print("\n— log messages follow the request's logLevel —")
+    def logged(frames):
+        return [f["params"]["level"] for f in frames if f.get("method") == "notifications/message"]
+    _, frames, _ = await read_sse(url, "levels")
+    check("no logLevel, no log frames", logged(frames), [])
+    check("... and ctx.log_level is None", frames[-1]["result"]["structuredContent"],
+          {"level": None})
+    _, frames, _ = await read_sse(url, "levels", log_level="warning")
+    check("logLevel=warning drops debug", logged(frames), ["warning", "error"])
+    _, frames, _ = await read_sse(url, "levels", log_level="debug")
+    check("logLevel=debug admits all", logged(frames), ["debug", "warning", "error"])
+    async with httpx.AsyncClient(timeout=10) as c:
+        for bad in ("warn", "WARNING", 3, None):
+            b = req_body("levels")
+            b["params"]["_meta"][META_LOG] = bad
+            r = await c.post(url, json=b, headers=HDRS("levels"))
+            check(f"logLevel {bad!r} is 400 / -32602",
+                  (r.status_code, r.json().get("error", {}).get("code")), (400, -32602))
+    _, frames, _ = await read_sse(url, "misspelt")
+    check("an unknown level in the handler is an in-band error, listener or not",
+          frames[-1]["result"].get("isError"), True)
 
     print("\n— tool without Context never streams —")
     async with httpx.AsyncClient(timeout=10) as c:
