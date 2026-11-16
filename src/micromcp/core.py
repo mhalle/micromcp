@@ -454,6 +454,13 @@ class _Core:
                       public URL, `name` a reverse-DNS "namespace/name", and
                       `repository` ({"url", "source"}) optional. The rest comes
                       from the registry (`MCP(description=...)` is required).
+    fallback          an app for every other path, once `path=` is set: an ASGI
+                      app on `ASGIServer`, a WSGI app on `Server`. It gets the
+                      request untouched (body unread, no MCP checks) after the
+                      `allowed_hosts` check; the endpoint, the Server Card, and
+                      the RFC 9728 document stay micromcp's. For plain routes
+                      beside /mcp, such as links a tool returns to things it
+                      renders.
     """
 
     def __init__(self, mcp: MCP, *, allowed_origins=(), allowed_hosts=(),
@@ -461,9 +468,16 @@ class _Core:
                  workers=WORKERS, timeout=300.0, stream_budget=STREAM_BUDGET,
                  keepalive=KEEPALIVE, cancel_grace=CANCEL_GRACE,
                  queue_size=QUEUE_SIZE, offload_bytes=OFFLOAD_BYTES,
-                 legacy=None, resource_metadata=None, server_card=None):
+                 legacy=None, resource_metadata=None, server_card=None, fallback=None):
         if legacy not in (None, "stateless"):
             raise ValueError('legacy must be None or "stateless"')
+        if fallback is not None:
+            if not callable(fallback):
+                raise TypeError("fallback must be an app (a callable)")
+            if not path:
+                raise ValueError("fallback= needs path=: without it every path is the MCP "
+                                 "endpoint, and the fallback would never be called")
+        self.fallback = fallback
         self.metadata_url = None
         if resource_metadata is not None:
             if not isinstance(resource_metadata, dict):
@@ -567,6 +581,28 @@ class _Core:
 
     def path_ok(self, path: str) -> bool:
         return self.path is None or _norm_path(path) == self.path
+
+    def to_fallback(self, path: str) -> bool:
+        """True when `path` belongs to the fallback app: one is set, and the
+        path is neither the endpoint nor a document served beside it."""
+        if self.fallback is None or self.path_ok(path):
+            return False
+        p = _norm_path(path)
+        return p != self.card_path and not (self.resource_metadata is not None
+                                            and p == self.well_known_path)
+
+    def fallback_refusal(self, headers, hosts=1):
+        """The answer instead of the fallback, or None to hand the request on.
+        Only the DNS-rebinding guard applies: `allowed_hosts` protects every
+        path this server answers. `hosts` is how many Host headers came, since
+        a fallback that read another copy than the guard would be unguarded."""
+        if not self.allowed_hosts:
+            return None
+        if hosts > 1:
+            return _err(400, None, INVALID_REQUEST, "repeated Host header")
+        if not self._host_ok(headers):
+            return _err(403, None, HEADER_MISMATCH, "Host not allowed")
+        return None
 
     def well_known(self, http_method, path, headers):
         """The RFC 9728 document, when configured: GET answers it (readable

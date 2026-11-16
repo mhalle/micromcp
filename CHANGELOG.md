@@ -74,6 +74,14 @@
   and `mimeType`, and resource-link `uri` and `name`, must be strings, and
   any `annotations` get the same validation as the helpers'.
 
+- `fallback=` on `Server` (a WSGI app) and `ASGIServer` (an ASGI app) answers
+  every path but the endpoint, so one process can serve `/mcp` and the plain
+  URLs its tools return, such as rendered images. It requires `path=`. The
+  request reaches it untouched; only `allowed_hosts` applies first (a refused
+  or repeated Host never reaches it). The Server Card and the RFC 9728
+  document stay micromcp's; on ASGI, WebSockets to other paths go to the
+  fallback and the lifespan does not. New suite `tests/test_fallback.py`.
+
 ### MCP Apps
 - A specifier the page's own import map resolves is no longer reported as a
   path a widget cannot load. A bundle that leaves `three` and `three/addons/`

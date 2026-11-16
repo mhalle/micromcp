@@ -7,6 +7,7 @@ import asyncio
 from ._constants import INVALID_REQUEST
 from .core import _Core, _encode
 from .errors import _err
+from .registry import _is_async
 
 
 class ASGIServer(_Core):
@@ -15,7 +16,14 @@ class ASGIServer(_Core):
     `async def` handlers are awaited on the caller's own event loop; `def`
     handlers are pushed to the server's thread pool so they cannot stall it.
     Mount it directly in Starlette/FastAPI/Litestar, or run it under uvicorn.
+    With `path=` and `fallback=`, another ASGI app answers every other path.
     """
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        if self.fallback is not None and not _is_async(self.fallback):
+            raise TypeError("ASGIServer's fallback must be an ASGI app (an async callable); "
+                            "a WSGI app goes to Server(fallback=...)")
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
@@ -28,6 +36,21 @@ class ASGIServer(_Core):
                     await send({"type": "lifespan.shutdown.complete"})
                     return
             return
+
+        # The lifespan stays micromcp's: the fallback gets none of its events.
+        if scope["type"] in ("http", "websocket") and self.to_fallback(scope.get("path", "/")):
+            raw_hosts = [v for k, v in scope.get("headers", []) if k.lower() == b"host"]
+            refused = self.fallback_refusal(
+                {"host": raw_hosts[-1].decode("latin-1")} if raw_hosts else {}, len(raw_hosts))
+            if refused is None:
+                return await self.fallback(scope, receive, send)
+            if scope["type"] == "websocket":       # closing before accept refuses the handshake
+                return await send({"type": "websocket.close", "code": 1008})
+            status, data = _encode(*refused)
+            await send({"type": "http.response.start", "status": status,
+                        "headers": [(b"content-type", b"application/json"),
+                                    (b"content-length", str(len(data)).encode())]})
+            return await send({"type": "http.response.body", "body": data})
 
         if scope["type"] != "http":  # websocket etc.
             if scope["type"] == "websocket":

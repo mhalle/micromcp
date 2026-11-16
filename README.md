@@ -571,6 +571,36 @@ from micromcp.contrib.django import django_view, django_async_view
 urlpatterns = [path("mcp", django_async_view(ASGIServer(mcp)))]
 ```
 
+**Other routes, no framework.** `fallback=` hands every path but the endpoint
+to another app of the same kind, so one process serves `/mcp` and the plain
+URLs its tools return: rendered images, downloads, reports.
+
+```python
+def files(environ, start_response):            # any WSGI app: here, the standard library's own
+    blob = RENDERS.get(environ["PATH_INFO"].removeprefix("/r/"))
+    if blob is None:
+        start_response("404 Not Found", [("Content-Type", "text/plain")])
+        return [b"not found"]
+    start_response("200 OK", [("Content-Type", "image/png")])
+    return [blob]
+
+app = Server(mcp, path="/mcp", fallback=files)  # ASGIServer takes an ASGI app the same way
+
+from wsgiref.simple_server import make_server
+make_server("", 8000, app).serve_forever()
+```
+
+The fallback needs `path=`, since without it every path is the endpoint. It
+gets the request as it came, body unread and with no MCP checks, so its own
+answers, headers, and CORS are its own. The one guard that still applies is
+`allowed_hosts`: a Host it does not admit, or a repeated Host, is refused before
+the fallback is called, because DNS-rebinding protection should cover every path
+the server answers. The Server Card and the RFC 9728 document stay micromcp's.
+On `ASGIServer`, WebSocket connections to other paths go to the fallback too
+(one to the endpoint is still refused), and the lifespan stays micromcp's: the
+fallback gets no startup or shutdown events. A WSGI app given to `ASGIServer`,
+or an ASGI app given to `Server`, is refused at construction.
+
 Mount at the exact path clients will use: a framework `Mount("/mcp")` typically
 307-redirects `/mcp` to `/mcp/`, and some clients (`urllib`, not the `mcp` SDK)
 will not replay a POST across a redirect. `django_async_view` streams
@@ -702,6 +732,7 @@ on ephemeral ports. Ports and servers are never shared between suites.
 test_micromcp.py    29 unit assertions, stdlib only
 conform.py          12 checks against the strict mcp-types wire schema
 test_identity.py    74 checks: identity fields, icons, the Server Card on both transports
+test_fallback.py    29 checks: fallback= on both transports, Host guard, WebSockets, lifespan
 test_skills.py      108 checks: skills, directory reads, the frontmatter subset (against PyYAML)
 interop.py          end-to-end with the official mcp client, 9 assertions
 test_asgi.py        native ASGI under uvicorn and mounted in Starlette
