@@ -225,9 +225,11 @@ def _is_async(fn) -> bool:
             or inspect.iscoroutinefunction(getattr(fn, "__call__", None)))  # noqa: B004
 
 
-def _allowed(entry, principal, strict=False) -> bool:
-    """Evaluate an entry's guards. A guard that returns false, or raises
-    anything but an `Error`, denies (fail closed). When the entry is being
+async def _allowed(entry, principal, strict=False) -> bool:
+    """Evaluate an entry's guards. A guard may be `async def` (or return any
+    awaitable): its result is awaited before it is judged, since an awaitable
+    is truthy and would otherwise allow everyone. A guard that returns false,
+    or raises anything but an `Error`, denies (fail closed). When the entry is being
     invoked (`strict`), a guard that raises an `Error` such as `Unauthorized`
     chooses the answer instead — a 401 with its challenge; in a listing the
     entry is simply hidden. Invoked, every guard runs, so several that raise
@@ -236,7 +238,10 @@ def _allowed(entry, principal, strict=False) -> bool:
     scopes, first = [], None
     for guard in entry.get("_guards", ()):
         try:
-            if not guard(principal):
+            ok = guard(principal)
+            if inspect.isawaitable(ok):
+                ok = await ok
+            if not ok:
                 return False
         except Unauthorized as e:
             if not strict:

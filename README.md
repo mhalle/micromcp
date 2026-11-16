@@ -56,8 +56,10 @@ clients use to decide what to auto-approve. `outputSchema` is inferred from a
 `TypedDict` or dataclass return annotation, or passed explicitly via
 `output_schema=`.
 
-Guard failures return `isError: true` in-band rather than an HTTP error, which
-is what lets a model reason about them.
+A tool whose guard denies the caller is left out of `tools/list` and answers a
+call exactly as a missing tool does (see Auth below). A handler that raises
+returns `isError: true` in-band rather than an HTTP error, which is what lets a
+model reason about it.
 
 Arguments are validated against the generated `inputSchema` before the handler
 runs: a wrong type, a missing key, or an unexpected one is `-32602` (the schema
@@ -430,7 +432,8 @@ app = ASGIServer(mcp, authenticate=authenticate,
 
 `authenticate` may be `async def`; a sync one runs on a separate small pool,
 so it may block on a token store without competing with handlers. Guards run
-inline and must be cheap. Handler threads are daemons and the pool knows how
+inline and must be cheap; a guard may be `async def` (or return any awaitable),
+and its result is awaited before it is judged. Handler threads are daemons and the pool knows how
 busy it is: when all `workers` are occupied a sync call is refused with `503`
 rather than queued behind threads that may never return (a `def` handler
 cannot be interrupted, so poll `ctx.cancelled` in long loops). Both pools
@@ -732,6 +735,7 @@ on ephemeral ports. Ports and servers are never shared between suites.
 test_micromcp.py    29 unit assertions, stdlib only
 conform.py          12 checks against the strict mcp-types wire schema
 test_identity.py    74 checks: identity fields, icons, the Server Card on both transports
+test_guards.py      24 checks: async guards, hidden streaming tools, path= validation
 test_fallback.py    29 checks: fallback= on both transports, Host guard, WebSockets, lifespan
 test_skills.py      108 checks: skills, directory reads, the frontmatter subset (against PyYAML)
 interop.py          end-to-end with the official mcp client, 9 assertions
