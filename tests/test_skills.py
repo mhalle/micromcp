@@ -167,7 +167,7 @@ blob = png["contents"][0]
 check("a binary file is a blob with its MIME type", (blob["mimeType"], base64.b64decode(blob["blob"])),
       ("image/png", PNG))
 check("an unserved file is not found",
-      code(rpc("resources/read", {"uri": "skill://pdf-processing/.DS_Store"})), (404, -32601))
+      code(rpc("resources/read", {"uri": "skill://pdf-processing/.DS_Store"})), (400, -32602))
 res = rpc("resources/list")[1]["result"]["resources"]
 check("resources/list lists SKILL.md with its frontmatter",
       res, [{"uri": URI, "name": "pdf-processing", "mimeType": "text/markdown",
@@ -232,7 +232,12 @@ check("anonymous: not listed", anon("skills/list")[1]["result"]["skills"], [])
 check("anonymous: skills/get -32602",
       code(anon("skills/get", {"uri": "skill://secret/SKILL.md"})), (400, -32602))
 check("anonymous: file not found", code(anon("resources/read", {"uri": "skill://secret/a.md"})),
-      (404, -32601))
+      (400, -32602))
+hidden = anon("resources/read", {"uri": "skill://secret/a.md"})[1]["error"]
+missing = anon("resources/read", {"uri": "skill://secret/b.md"})[1]["error"]
+check("a hidden skill file answers exactly like a missing one, uri aside",
+      ({**hidden, "data": None}, hidden["data"]["uri"]),
+      ({**missing, "data": None}, "skill://secret/a.md"))
 check("anonymous: directory hidden", code(anon("resources/directory/read", {"uri": "skill://secret"})),
       (400, -32602))
 check("anonymous: not in resources/list", anon("resources/list")[1]["result"]["resources"], [])

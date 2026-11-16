@@ -930,7 +930,7 @@ class _Core:
                 owners = [m.skills[s] for s in held["skills"]]
                 if not any(_allowed(o, principal) for o in owners) \
                         and not _allowed(owners[0], principal, strict=True):
-                    raise Error(METHOD_NOT_FOUND, f"no such resource {uri!r}", 404)
+                    raise _ResourceNotFound(uri)     # exactly as for an unserved URI
                 return {"contents": [read_contents(uri, held["data"], held["mime"])]}
             entry, raw = m._match(uri or "")
             if not entry or not _allowed(entry, principal, strict=True):
