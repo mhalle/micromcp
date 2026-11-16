@@ -27,11 +27,12 @@ from ._constants import (
     INVALID_PARAMS, INVALID_REQUEST, KEEPALIVE, LIST_METHODS, LOG_LEVELS, MAX_BODY, MAX_URI,
     LEGACY_VERSIONS, META_CAPS, META_CLIENT, META_LOG, META_SERVER, META_SUB, META_VER,
     METHOD_NOT_FOUND, OFFLOAD_BYTES, PARSE_ERROR, PROTOCOL, QUEUE_SIZE, ROUTING_HEADERS,
-    SERVER_CARD, SERVER_CARD_MIME, SERVER_CARD_SCHEMA, SINGLETON_HEADERS, STREAM_BUDGET,
-    UNSUPPORTED_VERSION, WELL_KNOWN, WORKERS, log,
+    SERVER_CARD, SERVER_CARD_MIME, SERVER_CARD_SCHEMA, SINGLETON_HEADERS, DIRECTORY_MIME,
+    SKILLS_EXT, STREAM_BUDGET, UNSUPPORTED_VERSION, WELL_KNOWN, WORKERS, log,
 )
 from .errors import Error, Unauthorized, _Reply, _err
 from .markers import Context
+from .skills import read_contents
 from .registry import MCP, _allowed, _annotations_ok, _coerce, _is_async, _meta_ok
 from .schema import _check, _from_json
 
@@ -699,10 +700,16 @@ class _Core:
         return self.extra_headers("POST", headers, 200, own)
 
     def _capabilities(self) -> dict:
-        return {"tools": {"listChanged": False},
+        caps = {"tools": {"listChanged": False},
                 "resources": {"subscribe": False, "listChanged": False},
                 "prompts": {"listChanged": False},
                 "logging": {}}      # notifications/message on a streamed call naming a logLevel
+        ext = copy.deepcopy(self.mcp.extensions)
+        if self.mcp.skills:
+            ext[SKILLS_EXT] = {"directoryRead": True}
+        if ext:
+            caps["extensions"] = ext
+        return caps
 
     def reject_duplicates(self, names):
         """Early answer for repeated headers that identify the caller or route
@@ -801,7 +808,8 @@ class _Core:
             args = params.get("arguments")
             if args is not None and not isinstance(args, dict):
                 raise Error(INVALID_PARAMS, "params.arguments must be an object")
-        if method in LIST_METHODS and params.get("cursor") is not None:
+        if (method in LIST_METHODS or method in ("skills/list", "resources/directory/read")) \
+                and params.get("cursor") is not None:
             # We never issue cursors, so any cursor is one we did not issue.
             raise Error(INVALID_PARAMS, "unknown cursor")
         if method == "subscriptions/listen":
@@ -975,7 +983,14 @@ class _Core:
         if method == "tools/list":
             return {"tools": public(m.tools.values())}
         if method == "resources/list":
-            return {"resources": public(m.resources.values())}
+            # A skill's SKILL.md is listed with its frontmatter's name and
+            # description; its other files are readable but not listed.
+            listed = public(m.resources.values()) + [
+                {"uri": uri, "name": rec["name"],
+                 "description": rec["entry"]["frontmatter"]["description"],
+                 "mimeType": m.skill_files[uri]["mime"]}
+                for uri, rec in list(m.skills.items()) if _allowed(rec, principal)]
+            return {"resources": listed}
         if method == "resources/templates/list":
             return {"resourceTemplates": public(m.templates.values())}
         if method == "prompts/list":
@@ -1011,6 +1026,15 @@ class _Core:
 
         if method == "resources/read":
             uri = params.get("uri")
+            held = m.skill_files.get(uri) if isinstance(uri, str) else None
+            if held is not None:
+                # Readable when any skill that holds the file is: a file of
+                # a nested skill belongs to its enclosing skill too.
+                owners = [m.skills[s] for s in held["skills"]]
+                if not any(_allowed(o, principal) for o in owners) \
+                        and not _allowed(owners[0], principal, strict=True):
+                    raise _ResourceNotFound(uri)     # exactly as for an unserved URI
+                return {"contents": [read_contents(uri, held["data"], held["mime"])]}
             entry, raw = m._match(uri or "")
             if not entry or not _allowed(entry, principal, strict=True):
                 raise _ResourceNotFound(uri)
@@ -1069,7 +1093,43 @@ class _Core:
                 {"role": "user", "content": {"type": "text", "text": str(out)}}]
             return {"messages": msgs}
 
+        if m.skills and method in ("skills/list", "skills/get", "resources/directory/read"):
+            return self._skills(method, params, principal)
+
         raise Error(METHOD_NOT_FOUND, f"unknown method {method!r}", 404)
+
+    def _skills(self, method, params, principal):
+        """`skills/list`, `skills/get`, and `resources/directory/read`, the
+        methods of the Skills extension; answered only while a skill is
+        registered. A skill the caller may not use is not served at all."""
+        m = self.mcp
+        if method == "skills/list":
+            return {"skills": [copy.deepcopy(rec["entry"]) for rec in list(m.skills.values())
+                               if _allowed(rec, principal)]}
+        uri = params.get("uri")
+        if not isinstance(uri, str):
+            raise Error(INVALID_PARAMS, "params.uri must be a string")
+        if method == "skills/get":
+            rec = m.skills.get(uri)
+            if rec is None or not _allowed(rec, principal, strict=True):
+                raise Error(INVALID_PARAMS, f"No skill is served at {uri}", data={"uri": uri})
+            return {"skill": copy.deepcopy(rec["entry"])}
+        # resources/directory/read: every directory level of the skill URIs
+        # the caller may see, from the authority down, is a directory resource.
+        children: dict[str, dict] = {}
+        for fu, held in list(m.skill_files.items()):
+            if not any(_allowed(m.skills[s], principal) for s in held["skills"]):
+                continue
+            parts = fu[len("skill://"):].split("/")
+            for depth in range(1, len(parts)):
+                parent = "skill://" + "/".join(parts[:depth])
+                child = "skill://" + "/".join(parts[:depth + 1])
+                mime = DIRECTORY_MIME if depth + 1 < len(parts) else held["mime"]
+                children.setdefault(parent, {})[child] = {"uri": child, "name": parts[depth],
+                                                          "mimeType": mime}
+        if uri not in children:
+            raise Error(INVALID_PARAMS, f"{uri} is not a directory resource", data={"uri": uri})
+        return {"resources": [children[uri][k] for k in sorted(children[uri])]}
 
     # -- one request, start to finish -------------------------------------
     async def prepare(self, http_method, headers, raw):

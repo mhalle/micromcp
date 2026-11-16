@@ -16,7 +16,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PKG = ROOT / "src" / "micromcp"
-ORDER = ["_constants", "errors", "markers", "docstrings", "schema", "registry",
+ORDER = ["_constants", "errors", "markers", "docstrings", "schema", "skills", "registry",
          "core", "wsgi", "asgi", "contrib/django"]
 
 
