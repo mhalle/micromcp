@@ -471,6 +471,10 @@ class _Core:
                  legacy=None, resource_metadata=None, server_card=None, fallback=None):
         if legacy not in (None, "stateless"):
             raise ValueError('legacy must be None or "stateless"')
+        if path and not str(path).startswith("/"):
+            # "/mcp" would never match "mcp": every request would be a 404,
+            # or, with a fallback, handed to it with its bearer token.
+            raise ValueError(f"path must start with '/' (got {path!r})")
         if fallback is not None:
             if not callable(fallback):
                 raise TypeError("fallback must be an app (a callable)")
@@ -944,7 +948,7 @@ class _Core:
         would otherwise stream. Returns the kwargs the handler will receive,
         or None when the tool is unknown/denied (dispatch answers those)."""
         entry = self.mcp.tools.get(params.get("name"))
-        if not entry or not _allowed(entry, principal, strict=True):
+        if not entry or not await _allowed(entry, principal, strict=True):
             return None
         name, kwargs = entry["name"], dict(params.get("arguments") or {})
         problem = (await self.offload(_check, kwargs, entry["inputSchema"]) if big
@@ -986,10 +990,10 @@ class _Core:
                 out = [x async for x in out]
             return out
 
-        def public(entries):
+        async def public(entries):
             out = []
             for e in list(entries):
-                if not _allowed(e, principal):
+                if not await _allowed(e, principal):
                     continue
                 item = {k: v for k, v in e.items() if not k.startswith("_")}
                 if e.get("_meta_out"):
@@ -1017,20 +1021,20 @@ class _Core:
                 out["instructions"] = m.instructions
             return out
         if method == "tools/list":
-            return {"tools": public(m.tools.values())}
+            return {"tools": await public(m.tools.values())}
         if method == "resources/list":
             # A skill's SKILL.md is listed with its frontmatter's name and
             # description; its other files are readable but not listed.
-            listed = public(m.resources.values()) + [
+            listed = await public(m.resources.values()) + [
                 {"uri": uri, "name": rec["name"],
                  "description": rec["entry"]["frontmatter"]["description"],
                  "mimeType": m.skill_files[uri]["mime"]}
-                for uri, rec in list(m.skills.items()) if _allowed(rec, principal)]
+                for uri, rec in list(m.skills.items()) if await _allowed(rec, principal)]
             return {"resources": listed}
         if method == "resources/templates/list":
-            return {"resourceTemplates": public(m.templates.values())}
+            return {"resourceTemplates": await public(m.templates.values())}
         if method == "prompts/list":
-            return {"prompts": public(m.prompts.values())}
+            return {"prompts": await public(m.prompts.values())}
 
         if method == "tools/call":
             name = params.get("name")
@@ -1039,7 +1043,7 @@ class _Core:
             # method: 404/-32601 is reserved for methods the server does not
             # implement. A hidden tool answers exactly like a missing one, as
             # for resources and prompts: no existence oracle.
-            if not entry or not _allowed(entry, principal, strict=True):
+            if not entry or not await _allowed(entry, principal, strict=True):
                 raise Error(INVALID_PARAMS, f"Unknown tool: {name}")
             kwargs = bound if bound is not None else await self._bind_call(params, principal, False)
             inject(entry, kwargs)
@@ -1067,12 +1071,12 @@ class _Core:
                 # Readable when any skill that holds the file is: a file of
                 # a nested skill belongs to its enclosing skill too.
                 owners = [m.skills[s] for s in held["skills"]]
-                if not any(_allowed(o, principal) for o in owners) \
-                        and not _allowed(owners[0], principal, strict=True):
+                if not any([await _allowed(o, principal) for o in owners]) \
+                        and not await _allowed(owners[0], principal, strict=True):
                     raise _ResourceNotFound(uri)     # exactly as for an unserved URI
                 return {"contents": [read_contents(uri, held["data"], held["mime"])]}
             entry, raw = m._match(uri or "")
-            if not entry or not _allowed(entry, principal, strict=True):
+            if not entry or not await _allowed(entry, principal, strict=True):
                 raise _ResourceNotFound(uri)
             kwargs = m.coerce_params(entry, uri, raw)   # after the guard: -32602 reveals it
             inject(entry, kwargs)
@@ -1095,7 +1099,7 @@ class _Core:
         if method == "prompts/get":
             name = params.get("name")
             entry = m.prompts.get(name)
-            if not entry or not _allowed(entry, principal, strict=True):
+            if not entry or not await _allowed(entry, principal, strict=True):
                 raise Error(INVALID_PARAMS, f"Unknown prompt: {name}")
             args = dict(params.get("arguments") or {})
             declared = {a["name"] for a in entry["arguments"]}
@@ -1130,31 +1134,32 @@ class _Core:
             return {"messages": msgs}
 
         if m.skills and method in ("skills/list", "skills/get", "resources/directory/read"):
-            return self._skills(method, params, principal)
+            return await self._skills(method, params, principal)
 
         raise Error(METHOD_NOT_FOUND, f"unknown method {method!r}", 404)
 
-    def _skills(self, method, params, principal):
+    async def _skills(self, method, params, principal):
         """`skills/list`, `skills/get`, and `resources/directory/read`, the
         methods of the Skills extension; answered only while a skill is
         registered. A skill the caller may not use is not served at all."""
         m = self.mcp
         if method == "skills/list":
             return {"skills": [copy.deepcopy(rec["entry"]) for rec in list(m.skills.values())
-                               if _allowed(rec, principal)]}
+                               if await _allowed(rec, principal)]}
         uri = params.get("uri")
         if not isinstance(uri, str):
             raise Error(INVALID_PARAMS, "params.uri must be a string")
         if method == "skills/get":
             rec = m.skills.get(uri)
-            if rec is None or not _allowed(rec, principal, strict=True):
+            if rec is None or not await _allowed(rec, principal, strict=True):
                 raise Error(INVALID_PARAMS, f"No skill is served at {uri}", data={"uri": uri})
             return {"skill": copy.deepcopy(rec["entry"])}
         # resources/directory/read: every directory level of the skill URIs
         # the caller may see, from the authority down, is a directory resource.
         children: dict[str, dict] = {}
+        visible = {s for s, rec in list(m.skills.items()) if await _allowed(rec, principal)}
         for fu, held in list(m.skill_files.items()):
-            if not any(_allowed(m.skills[s], principal) for s in held["skills"]):
+            if not visible.intersection(held["skills"]):
                 continue
             parts = fu[len("skill://"):].split("/")
             for depth in range(1, len(parts)):
@@ -1365,6 +1370,11 @@ class _Core:
         if method == "subscriptions/listen":
             return era == "modern"
         if method != "tools/call":
+            return False
+        # `prepare` bound arguments only for a tool this caller may use. A
+        # hidden one must not stream: its 200 head would tell it from a
+        # missing tool, whose -32602 keeps its 400.
+        if req[4] is None:
             return False
         entry = self.mcp.tools.get(params.get("name"))
         return bool(entry and entry.get("_context"))

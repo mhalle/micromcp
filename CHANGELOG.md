@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Security
+- **An `async def` guard always allowed.** A guard's return value was judged
+  without being awaited, and a coroutine is truthy, so any tool, resource,
+  template, prompt, or skill guarded by a coroutine function was listed and
+  callable by everyone. Guards may now be `async def` (or return any
+  awaitable) and are awaited. Affects 0.2.0 and earlier.
+- A guard-hidden tool that takes a `Context` streamed its answer (a `200`
+  event stream) under `django_async_view` on Django's WSGI handler, which told
+  it apart from a missing tool (`400`). A tool the caller may not use is never
+  streamed.
+- `path=` must start with `/`. `path="mcp"` could never match a request, so
+  every request was a `404`, or, with `fallback=`, handed to the fallback with
+  its bearer token.
+
 ### Core
 - **Behavior change:** an unknown or guard-hidden tool (`tools/call`), prompt
   (`prompts/get`), or resource (`resources/read`) is answered `400` with

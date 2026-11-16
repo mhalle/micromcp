@@ -26,6 +26,7 @@ SUITES = [
     ("test_identity.py", ["unit"], 60),
     ("test_skills.py", ["unit"], 60),
     ("test_fallback.py", ["unit"], 60),
+    ("test_guards.py", ["unit"], 60),
     ("test_apps.py", ["unit"], 60),
     ("conform.py", ["conform"], 60),
     ("interop.py", ["interop", "server"], 120),
