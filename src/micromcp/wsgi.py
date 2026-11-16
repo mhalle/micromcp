@@ -67,7 +67,7 @@ class Server(_Core):
         http_method = environ.get("REQUEST_METHOD", "POST")
         full_path = (environ.get("SCRIPT_NAME", "") or "") + (environ.get("PATH_INFO", "") or "")
 
-        reply = self.well_known(http_method, full_path, headers)
+        reply = self.document(http_method, full_path, headers)
         if reply is not None:
             pass
         elif not self.path_ok(full_path):
@@ -102,11 +102,14 @@ class Server(_Core):
 
         status, payload = reply
         status, data = _encode(status, payload)
-        hdrs = [("Content-Length", str(len(data)))]
-        if data:
+        own = getattr(reply, "headers", ())
+        # A 304's length would be the 200's, so it sends none; an answer that
+        # names its own Content-Type (the Server Card) keeps it.
+        hdrs = [] if status == 304 else [("Content-Length", str(len(data)))]
+        if data and not any(k.lower() == "content-type" for k, _ in own):
             hdrs.insert(0, ("Content-Type", "application/json"))
         if http_method == "HEAD":                     # same head as GET, no body
             data = b""
-        hdrs += self.extra_headers(http_method, headers, status, getattr(reply, "headers", ()))
+        hdrs += self.extra_headers(http_method, headers, status, own)
         start_response(_STATUS.get(status, f"{status} Error"), hdrs)
         return [data]

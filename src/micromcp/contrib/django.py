@@ -23,8 +23,8 @@ def django_view(server: Server):
         environ["CONTENT_LENGTH"] = str(len(request.body))
         chunks = server(environ, lambda s, h: box.update(status=s, headers=h))
         body = b"".join(chunks)
-        resp = HttpResponse(body, status=int(box["status"].split()[0]),
-                            content_type="application/json" if body else None)
+        ctype = next((v for k, v in box["headers"] if k.lower() == "content-type"), None)
+        resp = HttpResponse(body, status=int(box["status"].split()[0]), content_type=ctype)
         for k, v in box["headers"]:
             if k.lower() not in ("content-type", "content-length"):
                 resp[k] = v
@@ -54,7 +54,7 @@ def django_async_view(server: ASGIServer):
         for k in ("CONTENT_TYPE", "CONTENT_LENGTH"):
             if request.META.get(k):
                 headers[k.replace("_", "-").lower()] = request.META[k]
-        early = server.well_known(request.method, request.path, headers)
+        early = server.document(request.method, request.path, headers)
         if early is None:
             early, req = await server.prepare(request.method, headers, request.body)
         else:

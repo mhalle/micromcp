@@ -11,6 +11,7 @@ import dataclasses
 import datetime
 import enum
 import functools
+import hashlib
 import inspect
 import json
 import os
@@ -25,9 +26,9 @@ from ._constants import (
     CANCEL_GRACE, CORS_HEADERS, HANDSHAKE_METHODS, HEADER_MISMATCH, INTERNAL_ERROR,
     INVALID_PARAMS, INVALID_REQUEST, KEEPALIVE, LIST_METHODS, LOG_LEVELS, MAX_BODY, MAX_URI,
     LEGACY_VERSIONS, META_CAPS, META_CLIENT, META_LOG, META_SERVER, META_SUB, META_VER,
-    METHOD_NOT_FOUND,
-    OFFLOAD_BYTES, PARSE_ERROR, PROTOCOL, QUEUE_SIZE, ROUTING_HEADERS, SINGLETON_HEADERS,
-    STREAM_BUDGET, UNSUPPORTED_VERSION, WELL_KNOWN, WORKERS, log,
+    METHOD_NOT_FOUND, OFFLOAD_BYTES, PARSE_ERROR, PROTOCOL, QUEUE_SIZE, ROUTING_HEADERS,
+    SERVER_CARD, SERVER_CARD_MIME, SERVER_CARD_SCHEMA, SINGLETON_HEADERS, STREAM_BUDGET,
+    UNSUPPORTED_VERSION, WELL_KNOWN, WORKERS, log,
 )
 from .errors import Error, Unauthorized, _Reply, _err
 from .markers import Context
@@ -35,6 +36,9 @@ from .registry import MCP, _allowed, _annotations_ok, _coerce, _is_async, _meta_
 from .schema import _check, _from_json
 
 _SENTINEL_RE = re.compile(r"^=\?base64\?(.*)\?=$")
+_CARD_NAME_RE = re.compile(r"^[a-zA-Z0-9.-]+/[a-zA-Z0-9._-]+$")   # Server Card `name`
+# What the Server Card schema calls a version range: ^1.2, ~1.2, >=1.2, 1.x, 1.*
+_VERSION_RANGE_RE = re.compile(r"^[\^~<>=]|\*|(?:^|\.)[xX](?:\.|$)")
 
 
 def _decode_hdr(v: str | None) -> str | None:
@@ -300,8 +304,8 @@ def _norm_path(p: str) -> str:
 
 
 _STATUS = {200: "200 OK", 202: "202 Accepted", 204: "204 No Content",
-           400: "400 Bad Request", 401: "401 Unauthorized", 403: "403 Forbidden",
-           404: "404 Not Found",
+           304: "304 Not Modified", 400: "400 Bad Request", 401: "401 Unauthorized",
+           403: "403 Forbidden", 404: "404 Not Found",
            405: "405 Method Not Allowed", 406: "406 Not Acceptable",
            411: "411 Length Required", 413: "413 Payload Too Large",
            500: "500 Internal Server Error", 503: "503 Service Unavailable"}
@@ -444,6 +448,11 @@ class _Core:
     resource_metadata the RFC 9728 protected-resource document (a dict) to serve
                       at /.well-known/oauth-protected-resource[<path>]; it also
                       supplies the default challenge URL for `Unauthorized`.
+    server_card       {"url": ..., "name": ..., "repository": ...} to publish a
+                      Server Card at <url>/server-card: `url` is this endpoint's
+                      public URL, `name` a reverse-DNS "namespace/name", and
+                      `repository` ({"url", "source"}) optional. The rest comes
+                      from the registry (`MCP(description=...)` is required).
     """
 
     def __init__(self, mcp: MCP, *, allowed_origins=(), allowed_hosts=(),
@@ -451,7 +460,7 @@ class _Core:
                  workers=WORKERS, timeout=300.0, stream_budget=STREAM_BUDGET,
                  keepalive=KEEPALIVE, cancel_grace=CANCEL_GRACE,
                  queue_size=QUEUE_SIZE, offload_bytes=OFFLOAD_BYTES,
-                 legacy=None, resource_metadata=None):
+                 legacy=None, resource_metadata=None, server_card=None):
         if legacy not in (None, "stateless"):
             raise ValueError('legacy must be None or "stateless"')
         self.metadata_url = None
@@ -493,6 +502,9 @@ class _Core:
         self.cancel_grace = cancel_grace
         self.queue_size = queue_size
         self.offload_bytes = offload_bytes
+        self.server_card = self.card_path = self._card_etag = None
+        if server_card is not None:
+            self._build_card(server_card, path)
         self._pool = _Pool(workers, "micromcp-worker")
         # Pre-dispatch work (authenticate, parsing large bodies) gets its own
         # lane, so untrusted handler code can never starve the auth path.
@@ -578,6 +590,97 @@ class _Core:
         # body. The document is only ever serialized, never handed out, so no
         # copy is needed per request.
         return _Reply(200, self.resource_metadata, cors)
+
+    def _build_card(self, spec, path):
+        """Assemble and check the Server Card once, at construction: it is a
+        static public document, so a bad one should fail here, not on GET."""
+        if not isinstance(spec, dict):
+            raise TypeError("server_card must be a dict")
+        unknown = sorted(str(k) for k in spec if k not in ("url", "name", "repository"))
+        if unknown:
+            raise ValueError(f"server_card: unknown key(s) {unknown} (expected url, name, "
+                             f"repository; the rest comes from MCP(...))")
+        name = spec.get("name")
+        if not isinstance(name, str) or not 3 <= len(name) <= 200 \
+                or not _CARD_NAME_RE.match(name):
+            raise ValueError("server_card['name'] must be reverse-DNS 'namespace/name', "
+                             "e.g. 'com.example/weather'")
+        # The endpoint's public URL comes from the operator, never from Host
+        # or a proxy header, for the same reason as the RFC 9728 document.
+        url = spec.get("url")
+        u = urlsplit(url) if isinstance(url, str) else None
+        if not u or u.scheme not in ("http", "https") or not u.netloc or u.query \
+                or u.fragment or any(ord(c) < 0x21 or ord(c) > 0x7E for c in url):
+            raise ValueError("server_card['url'] must be this endpoint's absolute http(s) URL "
+                             "without query or fragment")
+        m = self.mcp
+        if not m.description or len(m.description) > 100:
+            raise ValueError("a Server Card needs a description of at most 100 characters: "
+                             "pass MCP(..., description=...)")
+        if m.title is not None and not 1 <= len(m.title) <= 100:
+            raise ValueError("a Server Card's title must be 1 to 100 characters")
+        if not isinstance(m.version, str) or not m.version or len(m.version) > 255 \
+                or _VERSION_RANGE_RE.search(m.version):
+            raise ValueError(f"a Server Card's version must be one version, not a range: "
+                             f"{m.version!r}")
+        card = {"$schema": SERVER_CARD_SCHEMA, **m.server_info()}
+        card["name"] = name                       # the card's own reverse-DNS name
+        repo = spec.get("repository")
+        if repo is not None:
+            if not isinstance(repo, dict) or not isinstance(repo.get("url"), str) \
+                    or not isinstance(repo.get("source"), str) \
+                    or any(k not in ("url", "source", "subfolder", "id") for k in repo) \
+                    or any(not isinstance(repo[k], str) for k in ("subfolder", "id") if k in repo):
+                raise ValueError("server_card['repository'] must be {'url': ..., 'source': "
+                                 "'github', ...} with optional string subfolder and id")
+            ru = urlsplit(repo["url"])
+            if ru.scheme not in ("http", "https") or not ru.netloc:
+                raise ValueError("server_card['repository']['url'] must be an http(s) URL")
+            card["repository"] = dict(repo)
+        card["remotes"] = [{"type": "streamable-http", "url": url,
+                            "supportedProtocolVersions": self._supported()}]
+        endpoint = _norm_path(u.path)
+        if path and _norm_path(path) != endpoint:
+            log.warning("server_card['url'] path %r differs from path=%r: the card is served "
+                        "at %s; make sure requests for it reach this server",
+                        endpoint or "/", path, endpoint + SERVER_CARD)
+        self.server_card = card
+        self.card_path = endpoint + SERVER_CARD
+        self._card_etag = '"' + hashlib.sha256(_encode(200, card)[1]).hexdigest()[:32] + '"'
+
+    def card(self, http_method, path, headers):
+        """The Server Card, when configured: GET and HEAD answer it with an
+        ETag (304 when If-None-Match names it), readable from any origin, as
+        it carries public metadata only; OPTIONS is a bare preflight. It is
+        answered before authentication. None when not ours."""
+        if self.server_card is None or _norm_path(path) != self.card_path:
+            return None
+        if not self._host_ok(headers):            # DNS-rebinding guard applies here too
+            return _err(403, None, HEADER_MISMATCH, "Host not allowed")
+        cors = [("Access-Control-Allow-Origin", "*"),
+                ("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS"),
+                ("Access-Control-Allow-Headers", "Content-Type, If-None-Match"),
+                ("Access-Control-Expose-Headers", "ETag"),
+                ("Access-Control-Max-Age", "600")]
+        if http_method == "OPTIONS":
+            return _Reply(204, None, cors)
+        if http_method not in ("GET", "HEAD"):
+            return _err(405, None, INVALID_REQUEST, "GET only",
+                        headers=[("Allow", "GET, HEAD, OPTIONS"), *cors])
+        cache = [("Cache-Control", "public, max-age=3600"), ("ETag", self._card_etag)]
+        tags = headers.get("if-none-match", "")
+        if tags.strip() == "*" or self._card_etag in (
+                t.strip().removeprefix("W/") for t in tags.split(",")):
+            return _Reply(304, None, [*cors, *cache])
+        return _Reply(200, self.server_card,
+                      [("Content-Type", SERVER_CARD_MIME), *cors, *cache])
+
+    def document(self, http_method, path, headers):
+        """The public documents served beside the endpoint (the Server Card,
+        the RFC 9728 metadata), answered before any MCP processing. None when
+        the path is neither."""
+        reply = self.card(http_method, path, headers)
+        return reply if reply is not None else self.well_known(http_method, path, headers)
 
     def _supported(self) -> list:
         return [PROTOCOL, *LEGACY_VERSIONS] if self.legacy else [PROTOCOL]
@@ -786,7 +889,7 @@ class _Core:
         pv = params.get("protocolVersion")
         out = {"protocolVersion": pv if pv in LEGACY_VERSIONS else LEGACY_VERSIONS[0],
                "capabilities": self._capabilities(),
-               "serverInfo": {"name": self.mcp.name, "version": self.mcp.version}}
+               "serverInfo": self.mcp.server_info()}
         if self.mcp.instructions:
             out["instructions"] = self.mcp.instructions
         return out
@@ -1113,8 +1216,7 @@ class _Core:
             result = {"resultType": "complete", "ttlMs": 0, "cacheScope": "private",
                       **result}
             result["_meta"] = {**result.get("_meta", {}),
-                               META_SERVER: {"name": self.mcp.name,
-                                             "version": self.mcp.version}}
+                               META_SERVER: self.mcp.server_info()}
             return _Reply(200, {"jsonrpc": "2.0", "id": rid, "result": result})
         except Error as e:
             return self._error_reply(e, rid, headers or {}, era)
