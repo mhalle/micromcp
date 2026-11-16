@@ -9,6 +9,7 @@ import threading
 from ._constants import INTERNAL_ERROR, INVALID_REQUEST, log
 from .core import _STATUS, _Core, _Fork, _encode
 from .errors import _err
+from .registry import _is_async
 
 
 class _Loop:
@@ -51,11 +52,15 @@ class Server(_Core):
     """WSGI app serving one MCP endpoint.
 
     Async handlers are awaited on a background loop; sync handlers run on the
-    server's thread pool, so concurrent requests overlap either way.
+    server's thread pool, so concurrent requests overlap either way. With
+    `path=` and `fallback=`, another WSGI app answers every other path.
     """
 
     def __init__(self, *a, **k):
         super().__init__(*a, **k)
+        if self.fallback is not None and _is_async(self.fallback):
+            raise TypeError("Server's fallback must be a WSGI app; an ASGI app (an async "
+                            "callable) goes to ASGIServer(fallback=...)")
         self._runner = _Loop()
 
     def __call__(self, environ, start_response):
@@ -67,7 +72,14 @@ class Server(_Core):
         http_method = environ.get("REQUEST_METHOD", "POST")
         full_path = (environ.get("SCRIPT_NAME", "") or "") + (environ.get("PATH_INFO", "") or "")
 
-        reply = self.document(http_method, full_path, headers)
+        if self.to_fallback(full_path):
+            # A Host value never holds a comma: one means repeated headers
+            # joined into one (as gunicorn does), so count it as more than one.
+            reply = self.fallback_refusal(headers, 1 + headers.get("host", "").count(","))
+            if reply is None:
+                return self.fallback(environ, start_response)
+        else:
+            reply = self.document(http_method, full_path, headers)
         if reply is not None:
             pass
         elif not self.path_ok(full_path):
