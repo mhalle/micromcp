@@ -79,6 +79,12 @@
   path a widget cannot load. A bundle that leaves `three` and `three/addons/`
   external, with `imports=` mapping both, drew a warning about
   `three/addons/controls/OrbitControls.js` although the map covers it.
+- A widget whose page runs to a few hundred KB is warned about, with its size
+  and that of its largest script. A host fetches a widget whole, in one
+  `resources/read` result, and caches it per connector, so an inlined
+  dependency is paid for in a way an ordinary web page's is not — a namespace
+  import of a validation library, for one, can cost several hundred KB where
+  named imports cost a few.
 
 ## 0.2.0 — 2026-09-16 (tagged; not yet on PyPI)
 
