@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 import datetime
 import inspect
@@ -63,6 +64,11 @@ def _extensions_ok(extensions) -> dict:
 
 
 _AUDIENCE = ("user", "assistant")
+# The RFC 3339 form JSON Schema's date-time, JavaScript's Date, and Python all
+# read (uppercase T and Z): fromisoformat alone also takes week dates, basic
+# format, and missing offsets.
+_RFC3339_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+                         r"(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})")
 
 
 def _annotations_ok(ann, what: str) -> dict:
@@ -91,12 +97,18 @@ def _annotations_ok(ann, what: str) -> dict:
     if "lastModified" in ann:
         lm = ann["lastModified"]
         if isinstance(lm, datetime.datetime):
+            if lm.utcoffset() is None:
+                # Written without an offset, a client reads it as its own local time.
+                raise ValueError(f"{what} annotations: a lastModified datetime needs a "
+                                 f"timezone (e.g. datetime.now(timezone.utc))")
             lm = lm.isoformat()
         try:
-            datetime.datetime.fromisoformat(lm)
+            ok = bool(_RFC3339_RE.fullmatch(lm)) and bool(datetime.datetime.fromisoformat(lm))
         except (TypeError, ValueError):
-            raise ValueError(f"{what} annotations: lastModified must be an ISO 8601 "
-                             f"string or a datetime") from None
+            ok = False
+        if not ok:
+            raise ValueError(f"{what} annotations: lastModified must be an RFC 3339 timestamp "
+                             f"with an offset, such as 2026-01-12T15:00:58Z, or an aware datetime")
         out["lastModified"] = lm
     return out
 
@@ -110,10 +122,15 @@ def _http_url_ok(url, what: str) -> str:
     if u.scheme not in ("http", "https") or not u.netloc \
             or any(ord(c) < 0x21 or ord(c) > 0x7E for c in url):
         raise ValueError(f"{what} must be an absolute http(s) URL, got {url!r}")
+    if "@" in u.netloc:
+        # https://trusted.example@evil.example goes to evil.example.
+        raise ValueError(f"{what} must not carry user information (an '@' before the host), "
+                         f"got {url!r}")
     return url
 
 
-_ICON_SIZE_RE = re.compile(r"^(?:[1-9][0-9]*x[1-9][0-9]*|any)$")
+_ICON_SIZE_RE = re.compile(r"[1-9][0-9]*x[1-9][0-9]*|any")     # fullmatch: `$` admits "\n"
+_ICON_DATA_RE = re.compile(r"data:image/[a-z0-9.+-]+;base64,([A-Za-z0-9+/]+={0,2})")
 
 
 def _icons_ok(icons, what: str) -> list:
@@ -134,20 +151,27 @@ def _icons_ok(icons, what: str) -> list:
         if not isinstance(src, str):
             raise ValueError(f"{what} icon: src must be a string")
         if src.startswith("data:"):
-            if "," not in src or not src.split(",", 1)[0].endswith(";base64"):
-                raise ValueError(f"{what} icon: a data: src must be base64 "
-                                 f"(data:<type>;base64,...)")
+            m = _ICON_DATA_RE.fullmatch(src)
+            try:
+                ok = bool(m) and bool(base64.b64decode(m.group(1), validate=True))
+            except ValueError:
+                ok = False
+            if not ok:
+                # An icon is an image: data:text/html would be a page, not a picture.
+                raise ValueError(f"{what} icon: a data: src must be an image in base64 "
+                                 f"(data:image/png;base64,...)")
         else:
             _http_url_ok(src, f"{what} icon src")
         item = {"src": src}
         if "mimeType" in icon:
-            if not isinstance(icon["mimeType"], str) or "/" not in icon["mimeType"]:
-                raise ValueError(f"{what} icon: mimeType must be a MIME type such as 'image/png'")
+            mime = icon["mimeType"]
+            if not isinstance(mime, str) or not re.fullmatch(r"image/[a-z0-9.+-]+", mime):
+                raise ValueError(f"{what} icon: mimeType must be an image type such as 'image/png'")
             item["mimeType"] = icon["mimeType"]
         if "sizes" in icon:
             sizes = icon["sizes"]
             if not isinstance(sizes, (list, tuple)) \
-                    or not all(isinstance(s, str) and _ICON_SIZE_RE.match(s) for s in sizes):
+                    or not all(isinstance(s, str) and _ICON_SIZE_RE.fullmatch(s) for s in sizes):
                 raise ValueError(f"{what} icon: sizes must be a list like ['48x48', 'any']")
             item["sizes"] = list(sizes)
         if "theme" in icon:
@@ -536,13 +560,18 @@ class MCP:
     def _match(self, uri: str):
         """(entry, raw string captures) without coercion, so a caller can run
         the entry's guards before anything about its parameters is revealed."""
+        return next(self._matches(uri), (None, {}))
+
+    def _matches(self, uri: str):
+        """Every entry that serves `uri` as (entry, raw captures), most
+        specific first: the exact resource, then templates by longest literal
+        prefix. Reading takes the first the caller may use."""
         if uri in self.resources:
-            return self.resources[uri], {}
+            yield self.resources[uri], {}
         for entry in sorted(list(self.templates.values()), key=lambda e: -e["_prefix"]):
             m = entry["_re"].match(uri)
             if m:
-                return entry, m.groupdict()
-        return None, {}
+                yield entry, m.groupdict()
 
     @staticmethod
     def coerce_params(entry, uri: str, raw: dict) -> dict:

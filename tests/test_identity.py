@@ -260,6 +260,9 @@ else:
     check("django_view serves the card",
           (resp.status_code, resp["Content-Type"], json.loads(resp.content)),
           (200, SERVER_CARD_MIME, card))
+    again = Client().get("/mcp/server-card", HTTP_IF_NONE_MATCH=resp["ETag"])
+    check("django_view's 304 carries no Content-Type (not Django's text/html)",
+          (again.status_code, again.has_header("Content-Type"), again.content), (304, False, b""))
     resp = asyncio.run(AsyncClient().get("/a/mcp/server-card"))
     check("django_async_view serves the card",
           (resp.status_code, resp["Content-Type"], json.loads(resp.content)["remotes"][0]["url"]),
@@ -308,6 +311,21 @@ else:
     check("minimal card",
           sorted(e.message for e in jsonschema.Draft202012Validator(schema).iter_errors(minimal)),
           [])
+
+print("\nNovember review: icons are images, and URLs carry no user info")
+for label, icon in [
+        ("a data: page", {"src": "data:text/html;base64,PHNjcmlwdD4="}),
+        ("a data: URI with a header injection", {"src": "data:\r\nX-Evil: 1;base64,AA=="}),
+        ("a data: image that is not base64", {"src": "data:image/png;base64,<svg onload=x>"}),
+        ("a non-image mimeType", {"src": "https://example.com/i.png", "mimeType": "text/html"}),
+        ("a size with a trailing newline", {"src": "https://example.com/i.png", "sizes": ["48x48\n"]}),
+        ("user info in the src", {"src": "https://good.example@evil.example/i.png"})]:
+    check(f"icon refused: {label}", raises(lambda i=icon: MCP("x", icons=[i])), "ValueError")
+check("an SVG data: icon is still accepted (hosts sanitize SVG)",
+      MCP("x", icons=[{"src": "data:image/svg+xml;base64,PHN2Zy8+", "mimeType": "image/svg+xml"}])
+      .icons[0]["mimeType"], "image/svg+xml")
+check("website_url with user info is refused",
+      raises(lambda: MCP("x", website_url="https://good.example@evil.example")), "ValueError")
 
 print(f"\n{OK} passed, {FAIL} failed")
 raise SystemExit(1 if FAIL else 0)

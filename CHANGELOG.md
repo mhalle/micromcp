@@ -47,6 +47,38 @@
   in the file, so the bundle and the package could disagree about a skill's
   frontmatter. The names are now distinct, and `tools/bundle.py` refuses to
   build when two modules define the same top-level name.
+- A guard-hidden resource or template shadowed a visible template matching
+  the same URI: a read answered "Resource not found" where the template would
+  have served it, which also let a caller map hidden URIs by probing. Reads
+  now skip what the caller may not use and take the next match (a skill file,
+  the exact resource, then templates by longest prefix); with nothing usable
+  the most specific entry's guards still choose the answer, so a `401`
+  sign-in challenge is kept. Affects 0.2.0 and earlier.
+- A `Result` could set `resultType`, `ttlMs`, and `cacheScope` (an invalid
+  negative `ttlMs`, or `cacheScope: public` on per-user data), and hand-written
+  blocks were checked only for their required fields. A result now holds
+  `content`, `structuredContent`, `isError`, and `_meta` only, and each block is
+  checked as its helper builds it: field types, the `image/*` or `audio/*`
+  type, valid base64, exactly one of `text` and `blob`, and `_meta` keys. A
+  result that is not JSON is an in-band `isError`, as for a plain dict, rather
+  than a `-32603`.
+- Icons: a `data:` `src` must be a base64 image (`data:text/html` was
+  accepted and published, before authentication, on the Server Card),
+  `mimeType` must be `image/*`, and `sizes` no longer accept a trailing
+  newline. An http(s) URL (`src`, `website_url`) may not carry user info
+  (`https://good.example@evil.example` goes to `evil.example`).
+- `lastModified` must be RFC 3339 with an offset (`fromisoformat` also took
+  week dates and offset-less times JavaScript cannot read or reads as local
+  time); a `datetime` without a timezone is refused.
+- MCP Apps: an import-map key that is itself a path (`./`), or one only under
+  `scopes`, no longer silences the warnings about paths a widget cannot load.
+  A page holding a lone surrogate no longer crashes the size check (#22).
+- `django_view`'s empty answers (a Server Card `304`) no longer carry Django's
+  default `Content-Type: text/html`.
+- CI: the workflow token is read-only by default, actions are pinned to
+  commits, `twine` is pinned (it runs in the job whose build is published), and
+  macOS runs its oldest and newest Python only, since macOS runners were
+  starving and cancelling jobs.
 
 ### Core
 - **Behavior change:** an unknown or guard-hidden tool (`tools/call`), prompt

@@ -192,5 +192,47 @@ else:
     check("ListResourcesResult parses annotations",
           ListResourcesResult.model_validate(rpc("resources/list")["result"]).resources[0].annotations.priority, 0.5)
 
+print("\nNovember review: a Result controls content, not the protocol fields")
+import datetime as _dt  # noqa: E402
+from micromcp import Result  # noqa: E402
+
+rmcp = MCP("result-review")
+BAD = {
+    "protocol overrides": Result(content=[], resultType="input_required", ttlMs=-1, cacheScope="public"),
+    "an unknown top-level key": Result(content=[], foo={"x": 1}),
+    "an image whose mimeType is not image/*": result([{"type": "image", "data": "PGI+", "mimeType": "text/html"}]),
+    "image data that is not base64": result([{"type": "image", "data": "<script>", "mimeType": "image/png"}]),
+    "an int resource_link title": result([{"type": "resource_link", "uri": "a://b", "name": "b", "title": 7}]),
+    "a negative resource_link size": result([{"type": "resource_link", "uri": "a://b", "name": "b", "size": -1}]),
+    "both text and blob (one not a str)": result([{"type": "resource", "resource": {"uri": "a://b", "text": 123, "blob": "aGk="}}]),
+    "text with a blob of None": result([{"type": "resource", "resource": {"uri": "a://b", "text": "hi", "blob": None}}]),
+    "an int embedded mimeType": result([{"type": "resource", "resource": {"uri": "a://b", "text": "x", "mimeType": 3}}]),
+    "a reserved _meta key on a block": result([{"type": "text", "text": "x", "_meta": {"io.modelcontextprotocol/x": 1}}]),
+    "a reserved _meta key on an embedded resource":
+        result([{"type": "resource", "resource": {"uri": "a://b", "text": "x", "_meta": {"io.modelcontextprotocol/x": 1}}}]),
+    "bytes in structuredContent (not JSON)": result([], structured={"b": b"x"}),
+    "NaN in structuredContent": result([], structured={"n": float("nan")}),
+}
+for i, (label, value) in enumerate(BAD.items()):
+    rmcp.tool(name=f"bad{i}")(lambda v=value: v)
+rr = client(rmcp)
+for i, label in enumerate(BAD):
+    out = rr("tools/call", {"name": f"bad{i}", "arguments": {}})
+    got = out.get("result", {}).get("isError") if "result" in out else out.get("error", {}).get("code")
+    check(f"refused as an in-band isError: {label}", got, True)
+ok = rr("tools/list")  # the server is still fine
+check("good blocks still pass", "result" in ok, True)
+
+print("\nlastModified is RFC 3339 with an offset")
+for text in ("2026-01-01X00:00", "2026-W01-1", "20260101T000000", "2026-01-01T00:00:00 +00:00",
+             "2026-01-01T00:00:00+05", "2026-01-01T00:00:00", "2026-01-01", "2026-01-12t15:00:58z"):
+    check(f"refused: {text!r}", raises(lambda t=text: text_content("x", annotations={"lastModified": t})),
+          "ValueError")
+check("refused: a naive datetime",
+      raises(lambda: text_content("x", annotations={"lastModified": _dt.datetime(2026, 1, 1)})), "ValueError")
+for text in ("2026-01-12T15:00:58Z", "2026-01-12T15:00:58.25+05:30"):
+    check(f"accepted: {text!r}", text_content("x", annotations={"lastModified": text})["annotations"],
+          {"lastModified": text})
+
 print(f"\n{OK} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
