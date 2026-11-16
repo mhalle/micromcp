@@ -260,5 +260,58 @@ check("... also with a fallback, which would have received MCP traffic and its t
       raises(lambda: Server(mcp, path="mcp", fallback=files), ValueError), "ValueError")
 check("path='/mcp' is fine", type(Server(mcp, path="/mcp")).__name__, "Server")
 
+# ── a hidden resource does not shadow a visible template ────────────────────
+print("\na hidden resource or template is passed over, not answered")
+rmcp = MCP("shadow", "1")
+
+
+@rmcp.resource("notes://{nid}")
+def note(nid: str) -> str:
+    return f"note {nid}"
+
+
+@rmcp.resource("notes://payroll", guards=[deny])
+def payroll() -> str:
+    return "SECRET"
+
+
+@rmcp.resource("notes://admin-{rest}", guards=[lambda who: False])
+def admin(rest: str) -> str:
+    return "SECRET"
+
+
+@rmcp.resource("files://{name}", guards=[needs_login])
+def signed_in_file(name: str) -> str:
+    return "SECRET"
+
+
+rmcp.skill({"SKILL.md": "---\nname: hidden\ndescription: Hidden\n---\n", "a.md": "SECRET"},
+           guards=[deny])
+
+
+@rmcp.resource("skill://hidden/{rest}")
+def skill_fallback(rest: str) -> str:
+    return f"public {rest}"
+
+
+rapp = Server(rmcp)
+
+
+def text_of(uri):
+    s, body = rpc(rapp, "resources/read", {"uri": uri})
+    return s, (body.get("result") or {}).get("contents", [{}])[0].get("text") or body["error"]["message"]
+
+
+check("the visible template serves an ordinary URI", text_of("notes://hello"), (200, "note hello"))
+check("a hidden exact resource's URI is served by the template, like any other",
+      text_of("notes://payroll"), (200, "note payroll"))
+check("so is a hidden template's", text_of("notes://admin-x"), (200, "note admin-x"))
+check("a hidden skill file's URI falls to a matching template too",
+      text_of("skill://hidden/a.md"), (200, "public a.md"))
+check("with nothing else to serve it, a guard that raises Unauthorized still answers 401",
+      rpc(rapp, "resources/read", {"uri": "files://x"})[0], 401)
+check("and a URI nothing serves is still not found",
+      err(rpc(rapp, "resources/read", {"uri": "nothing://x"}))[:2], (400, -32602))
+
 print(f"\n{OK} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

@@ -111,7 +111,8 @@ resource instead of inlining it, and `embedded_resource` inlines one. A tool
 that returns bare `bytes` is an in-band `isError` naming these helpers, since
 the MIME type cannot be guessed. Every helper takes `annotations`, the spec's
 hints for the client: `audience` (`["user"]`, `["assistant"]`, or both),
-`priority` (0 to 1), and `lastModified` (ISO 8601, or a `datetime`). Hosts
+`priority` (0 to 1), and `lastModified` (RFC 3339 with an offset, such as
+`2026-01-12T15:00:58Z`, or a timezone-aware `datetime`). Hosts
 may ignore them. Unknown keys are refused, and hand-written blocks passed to
 `result()` get the same checks. The helpers also work inside prompt messages:
 `{"role": "user", "content": image_content(png, "image/png")}`.
@@ -131,7 +132,8 @@ def review(street: str, year: int = 2025) -> list:
 ```
 
 Exact URIs win over templates; among templates the longest literal prefix
-wins. Templates are reported via `resources/templates/list`. Placeholders must
+wins. An entry the caller's guards hide is skipped, so the next match serves
+the URI exactly as if the hidden one were not registered. Templates are reported via `resources/templates/list`. Placeholders must
 be plain identifiers — RFC 6570 operators (`{?q}`, `{+path}`) and duplicate
 names are rejected at registration — and matching is linear in the URI length.
 `int` and `bool` parameters are coerced strictly (`+12`, ` 12 `, `banana` are
@@ -177,7 +179,8 @@ These are how hosts present a server to people: a display name, one sentence on
 what it is for, a link, and icons. They go out in `serverInfo` beside `name` and
 `version` (in every result's `_meta`, and in `initialize` under
 `legacy="stateless"`), and are left out when unset. An icon's `src` is an
-http(s) URL or a base64 `data:` URI; `mimeType`, `sizes` (`"48x48"`, `"any"`),
+http(s) URL without user info or a base64 image `data:` URI
+(`data:image/png;base64,...`); `mimeType` (an `image/*` type), `sizes` (`"48x48"`, `"any"`),
 and `theme` (`"light"` or `"dark"`) are optional. `icons=` also works on
 `@mcp.tool`, `@mcp.resource` (templates included), and `@mcp.prompt`. All of it
 is checked when the server or entry is defined: a misspelled key, a size like
@@ -302,8 +305,11 @@ def show_crashes(street: str) -> dict:
 `io.modelcontextprotocol/` prefix) and published as its `_meta`; a resource's
 meta also rides on its read contents. `result(content, structured=,
 is_error=, meta=)` is the explicit way to return a finished tool result; its
-blocks are checked against the five content-block types before they leave,
-and its `_meta` is merged under the server's identity stamp. A plain dict is
+blocks are checked against the five content-block types before they leave
+(as strictly as the helpers build them), and its `_meta` is merged under the
+server's identity stamp. A result sets `content`, `structuredContent`,
+`isError`, and `_meta` only; the protocol fields (`resultType`, `ttlMs`,
+`cacheScope`) are the server's. A malformed one becomes an in-band `isError`. A plain dict is
 always data and is wrapped as JSON text, so client-derived data can never be
 mistaken for a result. `embedded_resource(uri, text=|blob=)` builds the block
 that MCP-UI-style hosts render from the result itself; MCP Apps hosts instead
@@ -744,8 +750,8 @@ on ephemeral ports. Ports and servers are never shared between suites.
 ```
 test_micromcp.py    29 unit assertions, stdlib only
 conform.py          12 checks against the strict mcp-types wire schema
-test_identity.py    74 checks: identity fields, icons, the Server Card on both transports
-test_guards.py      24 checks: async guards, hidden streaming tools, path= validation
+test_identity.py    83 checks: identity fields, icons, the Server Card on both transports
+test_guards.py      30 checks: async guards, hidden streaming tools, path=, template shadowing
 test_fallback.py    42 checks: fallback= on both transports, Host guard, WebSockets, lifespan
 test_skills.py      154 checks: skills, directory reads, the frontmatter subset (against PyYAML)
 interop.py          end-to-end with the official mcp client, 9 assertions

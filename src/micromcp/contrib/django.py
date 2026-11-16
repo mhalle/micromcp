@@ -25,6 +25,8 @@ def django_view(server: Server):
         body = b"".join(chunks)
         ctype = next((v for k, v in box["headers"] if k.lower() == "content-type"), None)
         resp = HttpResponse(body, status=int(box["status"].split()[0]), content_type=ctype)
+        if ctype is None:                       # an empty 304 or 202: not Django's text/html
+            del resp["Content-Type"]
         for k, v in box["headers"]:
             if k.lower() not in ("content-type", "content-length"):
                 resp[k] = v

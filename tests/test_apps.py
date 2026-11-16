@@ -1210,5 +1210,23 @@ check("import micromcp does not load micromcp.apps",
       subprocess.run([sys.executable, "-c", "import micromcp, sys; print('micromcp.apps' in sys.modules)"],
                      capture_output=True, text=True).stdout.strip(), "False")
 
+print("\nNovember review: import-map keys that are paths do not excuse paths")
+heard.clear()
+Widget("dotkey", html='<!doctype html><html><head><script type="importmap">'
+       '{"imports": {"./": "https://cdn.example.com/"}}</script></head><body>'
+       '<script type="module">if (window.x) import("./chunk-a1b2c3d4.js");</script></body></html>',
+       bridge=True)
+check("a './' key does not silence the run-time import warning",
+      any("'dotkey'" in m and "chunk-a1b2c3d4" in m for m in heard), True)
+heard.clear()
+Widget("scopekey", html='<!doctype html><html><head><script type="importmap">'
+       '{"imports": {}, "scopes": {"https://cdn.example.com/": {"./": "https://cdn.example.com/"}}}'
+       '</script></head><body><script type="module">if (window.x) import("./chunk-a1b2c3d4.js");'
+       '</script></body></html>', bridge=True)
+check("nor does a key only under scopes",
+      any("'scopekey'" in m and "chunk-a1b2c3d4" in m for m in heard), True)
+check("a page holding a lone surrogate still builds",
+      raises(lambda: Widget("surrogate", body="<p>\udcff</p>")), None)
+
 print(f"\n{OK} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

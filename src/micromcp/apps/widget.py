@@ -546,7 +546,12 @@ class _Loads(HTMLParser):
             maps = [spec.get("imports")]
             if isinstance(spec.get("scopes"), dict):
                 maps += list(spec["scopes"].values())
-            self.mapped |= {k for m in maps if isinstance(m, dict) for k in m if isinstance(k, str)}
+            # Only the top-level imports apply to every script, and a key that
+            # is itself a path ("./", "/") would excuse the very paths the
+            # warnings are about.
+            top = spec.get("imports")
+            self.mapped |= {k for k in (top if isinstance(top, dict) else ())
+                            if isinstance(k, str) and k and k[0] not in "./"}
             self.loads += [(url, "<script type=importmap>") for m in maps if isinstance(m, dict)
                            for url in m.values() if isinstance(url, str)]
         elif kind_type in ("", "module", "text/javascript", "application/javascript"):
@@ -679,10 +684,10 @@ _BIG_PAGE = 250 * 1024
 
 def _size(what, html, inline) -> None:
     """Warn about a page big enough to be felt, naming its largest script."""
-    size = len(html.encode("utf-8"))
+    size = len(html.encode("utf-8", "surrogatepass"))     # a lone surrogate is still a byte count
     if size < _BIG_PAGE:
         return
-    biggest = max((len(s.encode("utf-8")) for s in inline), default=0)
+    biggest = max((len(s.encode("utf-8", "surrogatepass")) for s in inline), default=0)
     log.warning("%s: its page is %.0f KB, and a host fetches it whole, in one resources/read "
                 "result, and caches it per connector%s. Something is inlined that need not "
                 "be: a library from an https URL is fetched once by the browser instead, and "

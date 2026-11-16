@@ -220,35 +220,85 @@ _BLOCK_FIELDS = {"text": ("text",), "image": ("data", "mimeType"), "audio": ("da
                  "resource_link": ("uri", "name"), "resource": ("resource",)}
 
 
+_RESULT_KEYS = ("content", "structuredContent", "isError", "_meta")
+
+
+def _b64_ok(text) -> bool:
+    try:
+        base64.b64decode(text, validate=True)
+        return True
+    except ValueError:                        # binascii.Error is a ValueError
+        return False
+
+
+def _block_problem(b, where: str) -> str | None:
+    """One content block checked as strictly as its helper would build it."""
+    if not isinstance(b, dict) or b.get("type") not in _BLOCK_FIELDS:
+        return f"{where} must be a block of type {sorted(_BLOCK_FIELDS)}"
+    kind = b["type"]
+    for f in _BLOCK_FIELDS[kind]:
+        if f not in b:
+            return f"{where} ({kind}) is missing {f!r}"
+    if kind == "text" and not isinstance(b["text"], str):
+        return f"{where} text must be a str"
+    if kind in ("image", "audio"):
+        if not isinstance(b["data"], str) or not _b64_ok(b["data"]):
+            return (f"{where} ({kind}) data must be base64 text; "
+                    f"use {kind}_content() to encode bytes")
+        if not isinstance(b["mimeType"], str) or not b["mimeType"].startswith(f"{kind}/"):
+            return f"{where} ({kind}) mimeType must be a {kind}/* type"
+    if kind == "resource_link":
+        for f in ("uri", "name", "title", "description", "mimeType"):
+            if f in b and not isinstance(b[f], str):
+                return f"{where} (resource_link) {f} must be a str"
+        size = b.get("size")
+        if "size" in b and (isinstance(size, bool) or not isinstance(size, int) or size < 0):
+            return f"{where} (resource_link) size must be a non-negative int"
+    if kind == "resource":
+        res = b["resource"]
+        if not isinstance(res, dict) or not isinstance(res.get("uri"), str):
+            return f"{where} resource needs a uri"
+        if ("text" in res) == ("blob" in res):
+            return f"{where} resource needs exactly one of text/blob"
+        if "text" in res and not isinstance(res["text"], str):
+            return f"{where} resource text must be a str"
+        if "blob" in res and (not isinstance(res["blob"], str) or not _b64_ok(res["blob"])):
+            return f"{where} resource blob must be base64 text; use embedded_resource(blob=...)"
+        if "mimeType" in res and not isinstance(res["mimeType"], str):
+            return f"{where} resource mimeType must be a str"
+        if "_meta" in res:
+            try:
+                res["_meta"] = _meta_ok(res["_meta"], f"{where} resource")
+            except ValueError as exc:
+                return str(exc)
+    if "_meta" in b:
+        try:
+            b["_meta"] = _meta_ok(b["_meta"], where)
+        except ValueError as exc:
+            return str(exc)
+    if "annotations" in b:
+        try:
+            b["annotations"] = _annotations_ok(b["annotations"], where)
+        except ValueError as exc:
+            return str(exc)
+    return None
+
+
 def _check_result(r: dict) -> str | None:
     """Validate an explicit Result against the CallToolResult shape hosts
-    accept. Returns a problem string or None."""
+    accept, normalizing it in place. Returns a problem string or None. A
+    Result controls content, structuredContent, isError, and _meta only: the
+    protocol fields every result carries (resultType, ttlMs, cacheScope) are
+    the server's."""
+    extra = sorted(str(k) for k in r if k not in _RESULT_KEYS)
+    if extra:
+        return f"unexpected key(s) {extra}; a result has {list(_RESULT_KEYS)}"
     if not isinstance(r.get("content"), list):
         return "content must be a list"
     for i, b in enumerate(r["content"]):
-        if not isinstance(b, dict) or b.get("type") not in _BLOCK_FIELDS:
-            return f"content[{i}] must be a block of type {sorted(_BLOCK_FIELDS)}"
-        for f in _BLOCK_FIELDS[b["type"]]:
-            if f not in b:
-                return f"content[{i}] ({b['type']}) is missing {f!r}"
-        if b["type"] == "text" and not isinstance(b["text"], str):
-            return f"content[{i}] text must be a str"
-        if b["type"] in ("image", "audio", "resource_link"):
-            for f in _BLOCK_FIELDS[b["type"]]:
-                if not isinstance(b[f], str):
-                    return f"content[{i}] ({b['type']}) {f} must be a str" + (
-                        f"; use {b['type']}_content() to encode bytes" if f == "data" else "")
-        if b["type"] == "resource":
-            res = b["resource"]
-            if not isinstance(res, dict) or not isinstance(res.get("uri"), str):
-                return f"content[{i}] resource needs a uri"
-            if (isinstance(res.get("text"), str)) == (isinstance(res.get("blob"), str)):
-                return f"content[{i}] resource needs exactly one of text/blob as a str"
-        if "annotations" in b:
-            try:
-                b["annotations"] = _annotations_ok(b["annotations"], f"content[{i}]")
-            except ValueError as exc:
-                return str(exc)
+        problem = _block_problem(b, f"content[{i}]")
+        if problem:
+            return problem
     if "isError" in r and not isinstance(r["isError"], bool):
         return "isError must be a bool"
     if "structuredContent" in r and not isinstance(r["structuredContent"], dict):
@@ -258,6 +308,11 @@ def _check_result(r: dict) -> str | None:
             _meta_ok(r["_meta"], "result")
         except ValueError as exc:
             return str(exc)
+    try:
+        json.dumps(r, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        # As for a plain dict: an in-band isError, not a -32603 later.
+        return f"not JSON ({exc})"
     return None
 
 
@@ -1079,18 +1134,30 @@ class _Core:
             return result
 
         if method == "resources/read":
-            uri = params.get("uri")
-            held = m.skill_files.get(uri) if isinstance(uri, str) else None
-            if held is not None:
-                # Readable when any skill that holds the file is: a file of
-                # a nested skill belongs to its enclosing skill too.
-                owners = [m.skills[s] for s in held["skills"]]
-                if not any([await _allowed(o, principal) for o in owners]) \
-                        and not await _allowed(owners[0], principal, strict=True):
-                    raise _ResourceNotFound(uri)     # exactly as for an unserved URI
+            uri = params.get("uri") or ""
+            # The first thing at this URI the caller may use answers it: a
+            # skill file, the exact resource, then templates by longest literal
+            # prefix. One the caller may not use is passed over as if it were
+            # not registered, so a hidden entry neither shadows a visible
+            # template nor tells the caller, by doing so, that it exists.
+            held = m.skill_files.get(uri)
+            # A file of a nested skill belongs to its enclosing skill too, so
+            # it is readable when any skill that holds it is.
+            owners = [m.skills[s] for s in held["skills"]] if held is not None else []
+            if owners and any([await _allowed(o, principal) for o in owners]):
                 return {"contents": [read_contents(uri, held["data"], held["mime"])]}
-            entry, raw = m._match(uri or "")
-            if not entry or not await _allowed(entry, principal, strict=True):
+            entry = raw = None
+            for candidate, captures in m._matches(uri):
+                if await _allowed(candidate, principal):
+                    entry, raw = candidate, captures
+                    break
+            if entry is None:
+                # Nothing here the caller may use. The most specific entry's
+                # guards still choose the answer (a 401 that starts a sign-in);
+                # otherwise it is not found, exactly as for an unserved URI.
+                first = owners[0] if owners else m._match(uri)[0]
+                if first is not None:
+                    await _allowed(first, principal, strict=True)
                 raise _ResourceNotFound(uri)
             kwargs = m.coerce_params(entry, uri, raw)   # after the guard: -32602 reveals it
             inject(entry, kwargs)
