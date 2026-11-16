@@ -24,10 +24,10 @@ from urllib.parse import urlsplit
 
 from ._constants import (
     CANCEL_GRACE, CORS_HEADERS, HANDSHAKE_METHODS, HEADER_MISMATCH, INTERNAL_ERROR,
-    INVALID_PARAMS, INVALID_REQUEST, KEEPALIVE, LIST_METHODS, MAX_BODY, MAX_URI,
-    LEGACY_VERSIONS, META_CAPS, META_CLIENT, META_SERVER, META_SUB, META_VER, METHOD_NOT_FOUND,
-    OFFLOAD_BYTES, PARSE_ERROR, PROTOCOL, QUEUE_SIZE, ROUTING_HEADERS, SERVER_CARD,
-    SERVER_CARD_MIME, SERVER_CARD_SCHEMA, SINGLETON_HEADERS, STREAM_BUDGET,
+    INVALID_PARAMS, INVALID_REQUEST, KEEPALIVE, LIST_METHODS, LOG_LEVELS, MAX_BODY, MAX_URI,
+    LEGACY_VERSIONS, META_CAPS, META_CLIENT, META_LOG, META_SERVER, META_SUB, META_VER,
+    METHOD_NOT_FOUND, OFFLOAD_BYTES, PARSE_ERROR, PROTOCOL, QUEUE_SIZE, ROUTING_HEADERS,
+    SERVER_CARD, SERVER_CARD_MIME, SERVER_CARD_SCHEMA, SINGLETON_HEADERS, STREAM_BUDGET,
     UNSUPPORTED_VERSION, WELL_KNOWN, WORKERS, log,
 )
 from .errors import Error, Unauthorized, _Reply, _err
@@ -691,7 +691,7 @@ class _Core:
         return {"tools": {"listChanged": False},
                 "resources": {"subscribe": False, "listChanged": False},
                 "prompts": {"listChanged": False},
-                "logging": {}}      # notifications/message on a streamed call
+                "logging": {}}      # notifications/message on a streamed call naming a logLevel
 
     def reject_duplicates(self, names):
         """Early answer for repeated headers that identify the caller or route
@@ -766,6 +766,9 @@ class _Core:
         info = (meta or {}).get(META_CLIENT)
         if info is not None and not isinstance(info, dict):
             raise Error(INVALID_PARAMS, f"_meta.{META_CLIENT} must be an object")
+        # Present means present: a null level is malformed, not a missing one.
+        if META_LOG in (meta or {}) and meta[META_LOG] not in LOG_LEVELS:
+            raise Error(INVALID_PARAMS, f"_meta.{META_LOG} must be one of {', '.join(LOG_LEVELS)}")
 
         if method in ("tools/call", "resources/read", "prompts/get"):
             # Bind the header to the field this method actually dispatches on;
@@ -901,7 +904,8 @@ class _Core:
             raise Error(INVALID_PARAMS, f"invalid arguments for tool {name!r}") from None
 
     # -- dispatch ---------------------------------------------------------
-    async def _dispatch(self, method, params, principal, emit=None, stop=None, bound=None):
+    async def _dispatch(self, method, params, principal, emit=None, stop=None, bound=None,
+                        era="modern"):
         """Async so handlers may be `async def`. Sync handlers run on the pool."""
         m = self.mcp
 
@@ -943,7 +947,11 @@ class _Core:
                 kwargs[entry["_principal"]] = principal
             if entry["_context"]:
                 meta = params.get("_meta") or {}
-                kwargs[entry["_context"]] = Context(emit, meta.get("progressToken"), stop, meta)
+                # 2026-07-28 sends log messages only to a request that names a
+                # level; a 2025-era request has no such field and gets them all.
+                level = meta.get(META_LOG) or (None if era == "modern" else LOG_LEVELS[0])
+                kwargs[entry["_context"]] = Context(emit, meta.get("progressToken"), stop, meta,
+                                                    log_level=level)
 
         if method == "server/discover":
             # Era negotiation. A modern client probes this FIRST; answering it
@@ -1173,7 +1181,8 @@ class _Core:
                     # Modern methods without the envelope: not a 2025 method.
                     raise Error(METHOD_NOT_FOUND, f"unknown method {method!r}", 404)
                 else:
-                    result = await self._dispatch(method, params, principal, emit, stop, bound)
+                    result = await self._dispatch(method, params, principal, emit, stop, bound,
+                                                  era)
                 # A 2025-era result: no resultType/ttlMs/cacheScope, and the
                 # server identifies itself in initialize, not in every _meta.
                 # The response names the era actually served.
