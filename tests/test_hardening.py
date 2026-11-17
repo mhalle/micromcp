@@ -194,6 +194,23 @@ def rpc(method, params=None, *, raw=None, hdrs=None, auth_hdr=None, name=None, r
 def err(resp):
     return resp[0], resp[1]["error"]["code"]
 
+def refused(resp):
+    """(status, "isError") when the arguments were refused before the handler
+    ran; any other answer (a handler's own isError included) shows as itself."""
+    s, r = resp[0], resp[1] or {}
+    res = r.get("result") or {}
+    if res.get("isError"):
+        text = (res.get("content") or [{}])[0].get("text", "")
+        return s, "isError" if text.startswith("Invalid arguments for tool ") else f"isError: {text}"
+    return s, r.get("error", {}).get("code", "no error")
+
+def bad_args(resp):
+    """(status, isError, text): bad arguments are a tool execution error the
+    model reads, not a protocol error."""
+    s, r = resp
+    res = (r or {}).get("result") or {}
+    return s, res.get("isError"), (res.get("content") or [{}])[0].get("text")
+
 def wait(port, timeout=20):
     end = time.time() + timeout
     while time.time() < end:
@@ -234,9 +251,10 @@ def main():
     tools = {t["name"]: t for t in rpc("tools/list")[1]["result"]["tools"]}
     check("audit: who is not in the schema", "who" in tools["audit"]["inputSchema"]["properties"], False)
     check("opt: Optional[Principal] not in the schema", "who" in tools["opt"]["inputSchema"]["properties"], False)
-    check("client-supplied who is rejected",
-          err(rpc("tools/call", {"name": "audit", "arguments": {"street": "x", "who": {"sub": "attacker"}}})),
-          (400, -32602))
+    s_, is_error, text = bad_args(rpc("tools/call", {"name": "audit",
+                                                     "arguments": {"street": "x", "who": {"sub": "attacker"}}}))
+    check("client-supplied who is rejected before the handler runs (isError, no structuredContent)",
+          (s_, is_error, "attacker" in (text or "")), (200, True, False))
     check("real principal injected",
           rpc("tools/call", {"name": "audit", "arguments": {"street": "x"}}, auth_hdr="Bearer good")
           [1]["result"]["structuredContent"], {"principal": {"sub": "real"}})
@@ -320,10 +338,14 @@ def main():
 
     print("— H8 argument validation —")
     check("add(1,2) ok", rpc("tools/call", {"name": "add", "arguments": {"a": 1, "b": 2}})[1]["result"]["structuredContent"], {"sum": 3})
-    check('add("1","2") -> -32602', err(rpc("tools/call", {"name": "add", "arguments": {"a": "1", "b": "2"}})), (400, -32602))
-    check("bool for int -> -32602", err(rpc("tools/call", {"name": "add", "arguments": {"a": True, "b": 2}})), (400, -32602))
-    check("missing arg -> -32602", err(rpc("tools/call", {"name": "add", "arguments": {"a": 1}})), (400, -32602))
-    check("extra arg -> -32602", err(rpc("tools/call", {"name": "add", "arguments": {"a": 1, "b": 2, "c": 3}})), (400, -32602))
+    for label, args in (('add("1","2")', {"a": "1", "b": "2"}), ("bool for int", {"a": True, "b": 2}),
+                        ("missing arg", {"a": 1}), ("extra arg", {"a": 1, "b": 2, "c": 3})):
+        s, is_error, text = bad_args(rpc("tools/call", {"name": "add", "arguments": args}))
+        check(f"{label} -> 200 with isError, as 2026-07-28 specifies",
+              (s, is_error, (text or "").startswith("Invalid arguments for tool add: ")), (200, True, True))
+    check("... naming the problem for the model",
+          bad_args(rpc("tools/call", {"name": "add", "arguments": {"a": 1}}))[2],
+          "Invalid arguments for tool add: missing required b")
     check("schema closes additionalProperties", tools["add"]["inputSchema"].get("additionalProperties"), False)
 
     print("— H9 templates are linear; bad coercion is -32602 —")
@@ -758,7 +780,7 @@ def round2():
                             "HTTP_MCP_PROTOCOL_VERSION": PROTOCOL, "HTTP_MCP_METHOD": "tools/call",
                             "HTTP_MCP_NAME": tool}, lambda st, h: bx.update(s=st)))
         return int(bx["s"].split()[0]), json.loads(out)
-    check("partial: client cannot override bound db", err(call(s2, "bound", {"street": "x", "db": "../etc"})), (400, -32602))
+    check("partial: client cannot override bound db", refused(call(s2, "bound", {"street": "x", "db": "../etc"})), (200, "isError"))
     check("partial: handler sees bound value + principal",
           call(s2, "bound", {"street": "x"})[1]["result"]["structuredContent"], {"db": "prod-conn", "who": {"sub": "p"}})
 
@@ -793,11 +815,11 @@ def round2():
                              "p": "/tmp/f.txt", "o": {"inner": {"n": 7}}})
     check("date/enum/set/tuple/path/dataclass arrive typed", r["result"].get("structuredContent"),
           {"d": 2020, "c": "RED", "tags": ["a"], "pair": "x", "p": "f.txt", "o": 7, "maybe": None})
-    check("bad ISO date -> -32602", err(call(s2, "rich", {"d": "2020-13-99", "c": "red", "tags": [], "pair": [1, "x"],
-                                                        "p": "x", "o": {"inner": {"n": 1}}})), (400, -32602))
+    check("bad ISO date -> isError", refused(call(s2, "rich", {"d": "2020-13-99", "c": "red", "tags": [], "pair": [1, "x"],
+                                                        "p": "x", "o": {"inner": {"n": 1}}})), (200, "isError"))
     check("nested dataclass rejects unknown keys (E17)",
-          err(call(s2, "rich", {"d": "2020-01-01", "c": "red", "tags": [], "pair": [1, "x"], "p": "x",
-                                "o": {"inner": {"n": 1, "zzz": 1}}})), (400, -32602))
+          refused(call(s2, "rich", {"d": "2020-01-01", "c": "red", "tags": [], "pair": [1, "x"], "p": "x",
+                                "o": {"inner": {"n": 1, "zzz": 1}}})), (200, "isError"))
     try:
         import pydantic
         class PInner(pydantic.BaseModel):
@@ -811,8 +833,8 @@ def round2():
         check("pydantic $defs hoisted to root", ("$defs" in sch, "$defs" in sch["properties"]["o"]), (True, False))
         check("pydantic model constructed for the handler", call(s2, "pyd", {"o": {"inner": {"n": 3}}})[1]["result"]["structuredContent"],
               {"n": 3, "kind": "POuter"})
-        check("pydantic nested validated via $ref", err(call(s2, "pyd", {"o": {"inner": "bogus"}})), (400, -32602))
-        check("pydantic model rejects unknown keys", err(call(s2, "pyd", {"o": {"inner": {"n": 1}, "zzz": 1}})), (400, -32602))
+        check("pydantic nested validated via $ref", refused(call(s2, "pyd", {"o": {"inner": "bogus"}})), (200, "isError"))
+        check("pydantic model rejects unknown keys", refused(call(s2, "pyd", {"o": {"inner": {"n": 1}, "zzz": 1}})), (200, "isError"))
     except ImportError:
         print("  skip  (pydantic not installed)")
 
@@ -1133,7 +1155,7 @@ def round3():
     sch = m.tools["two"]["inputSchema"]
     check("$defs are namespaced per parameter", all(k.startswith(("a__", "b__")) for k in sch["$defs"]), True)
     check("both models validate against their own defs", call(s3, "two", {"a": {"inner": {"n": 1}}, "b": {"inner": {"label": "x"}}})[0], 200)
-    check("cross-model shape rejected", code(call(s3, "two", {"a": {"inner": {"label": "pwn"}}, "b": {"inner": {"label": "x"}}})), (400, -32602))
+    check("cross-model shape rejected", refused(call(s3, "two", {"a": {"inner": {"label": "pwn"}}, "b": {"inner": {"label": "x"}}})), (200, "isError"))
     class Deep(pydantic.BaseModel):
         z: int
     class Mid(pydantic.BaseModel):
@@ -1157,7 +1179,8 @@ def round3():
     @m.tool
     def leak(s: Secretive) -> dict: return {}
     s, r = call(s3, "leak", {"s": {"v": 1}})
-    check("-32602 without the validator text", (s, r["error"]["code"], "S3cr3t" in r["error"]["message"]), (400, -32602, False))
+    check("isError without the validator text",
+          (s, r["result"]["isError"], "S3cr3t" in json.dumps(r)), (200, True, False))
 
     print("— G6/G7 constraints and depth —")
     class Strict(pydantic.BaseModel):
@@ -1168,18 +1191,18 @@ def round3():
     def strict(x: Strict) -> dict: return {"ok": 1}
     for bad, label in (({"n": 11, "s": "zzz"}, "maximum"), ({"n": 3, "s": "zzz"}, "multipleOf"), ({"n": 2, "s": "zz"}, "minLength"),
                        ({"n": 2, "s": "abc"}, "pattern"), ({"n": 2, "s": "zzz", "k": "b"}, "const")):
-        check(f"{label} enforced by _check", code(call(s3, "strict", {"x": bad})), (400, -32602))
+        check(f"{label} enforced by _check", refused(call(s3, "strict", {"x": bad})), (200, "isError"))
     check("valid strict payload accepted", call(s3, "strict", {"x": {"n": 2, "s": "zzz"}})[0], 200)
     @m.tool
     def dated(d: datetime.date) -> dict: return {"y": d.year}
-    check("format: date enforced by _check", "valid date" in call(s3, "dated", {"d": "banana"})[1]["error"]["message"], True)
+    check("format: date enforced by _check", "valid date" in call(s3, "dated", {"d": "banana"})[1]["result"]["content"][0]["text"], True)
     class Node(pydantic.BaseModel):
         kids: list["Node"] = []
     @m.tool
     def rec(n: Node) -> dict: return {}
     d = {"kids": []}
     for _ in range(400): d = {"kids": [d]}
-    check("depth-400 payload -> -32602, not 500", code(call(s3, "rec", {"n": d})), (400, -32602))
+    check("depth-400 payload -> isError, not 500", refused(call(s3, "rec", {"n": d})), (200, "isError"))
 
     print("— G8/G10/G11 Literal[Enum], closed union probe, init=False —")
     class Mode(str, enum.Enum):
