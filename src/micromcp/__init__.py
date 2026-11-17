@@ -43,7 +43,7 @@ from .schema import _check  # noqa: F401
 from .skills import FrontmatterError, parse_frontmatter  # noqa: F401
 from .wsgi import Server, _Loop  # noqa: F401
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 __all__ = [
     "MCP", "Server", "ASGIServer", "Context", "Principal", "Error", "Unauthorized",
