@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 — 2026-11-17
+
+Follows a correction to the 2026-07-28 schema: a tool call with bad
+arguments is now answered with an `isError` result the model can read and
+fix, rather than a `-32602` protocol error. **Behavior change** for clients
+that matched on `-32602` for argument errors (see Core).
 
 ### Core
 - **Behavior change:** a `tools/call` whose arguments fail the tool's schema or
