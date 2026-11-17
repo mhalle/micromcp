@@ -470,6 +470,21 @@ class _ResourceNotFound(Error):
         super().__init__(INVALID_PARAMS, "Resource not found", data={"uri": uri})
 
 
+class _BadArguments:
+    """What `_bind_call` hands back for arguments that fail the tool's schema
+    or conversion. The call is answered with an in-band `isError` result, so
+    the model reads the problem and can retry; 2026-07-28 reserves -32602 for
+    a `tools/call` that is itself malformed (`arguments` not an object)."""
+
+    __slots__ = ("message",)
+
+    def __init__(self, message):
+        self.message = message
+
+    def result(self):
+        return {"content": [{"type": "text", "text": self.message}], "isError": True}
+
+
 class _Core:
     """Transport-neutral MCP logic: validate, dispatch, wrap.
 
@@ -1013,9 +1028,11 @@ class _Core:
 
     async def _bind_call(self, params, principal, big):
         """Validate and convert a tools/call's arguments before any response
-        byte is committed, so a -32602 keeps its HTTP 400 even on a tool that
-        would otherwise stream. Returns the kwargs the handler will receive,
-        or None when the tool is unknown/denied (dispatch answers those)."""
+        byte is committed, so a call with bad arguments is answered as plain
+        JSON even on a tool that would otherwise stream. Returns the kwargs
+        the handler will receive, a `_BadArguments` when they fail (dispatch
+        answers an in-band `isError`), or None when the tool is unknown or
+        denied (dispatch answers those)."""
         entry = self.mcp.tools.get(params.get("name"))
         if not entry or not await _allowed(entry, principal, strict=True):
             return None
@@ -1023,13 +1040,13 @@ class _Core:
         problem = (await self.offload(_check, kwargs, entry["inputSchema"]) if big
                    else _check(kwargs, entry["inputSchema"]))
         if problem:
-            raise Error(INVALID_PARAMS, f"invalid arguments for tool {name!r}: {problem}")
+            return _BadArguments(f"Invalid arguments for tool {name}: {problem}")
         try:
             return {k: _from_json(v, entry["_hints"].get(k)) for k, v in kwargs.items()}
         except Exception:
             # Constructor/validator text can carry server-side detail; keep it here.
             log.info("argument conversion for tool %r failed", name, exc_info=True)
-            raise Error(INVALID_PARAMS, f"invalid arguments for tool {name!r}") from None
+            return _BadArguments(f"Invalid arguments for tool {name}")
 
     # -- dispatch ---------------------------------------------------------
     async def _dispatch(self, method, params, principal, emit=None, stop=None, bound=None,
@@ -1115,6 +1132,8 @@ class _Core:
             if not entry or not await _allowed(entry, principal, strict=True):
                 raise Error(INVALID_PARAMS, f"Unknown tool: {name}")
             kwargs = bound if bound is not None else await self._bind_call(params, principal, False)
+            if isinstance(kwargs, _BadArguments):
+                return kwargs.result()
             inject(entry, kwargs)
             try:
                 result = _as_content(await run(entry, kwargs))
@@ -1454,8 +1473,9 @@ class _Core:
             return False
         # `prepare` bound arguments only for a tool this caller may use. A
         # hidden one must not stream: its 200 head would tell it from a
-        # missing tool, whose -32602 keeps its 400.
-        if req[4] is None:
+        # missing tool, whose -32602 keeps its 400. Bad arguments are answered
+        # at once, as one JSON result: there is nothing to stream.
+        if req[4] is None or isinstance(req[4], _BadArguments):
             return False
         entry = self.mcp.tools.get(params.get("name"))
         return bool(entry and entry.get("_context"))

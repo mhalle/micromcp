@@ -198,7 +198,8 @@ def legacy_wsgi_section():
     check("modern unknown tool is 400/-32602", (s, j["error"]["code"], h.get("mcp-protocol-version")),
           (400, -32602, PROTOCOL))
     s, j, _ = wsgi(app, rpc("tools/call", {"name": "add", "arguments": {"a": "x", "b": 3}}), V)
-    check("argument validation still applies", (s, j["error"]["code"]), (400, -32602))
+    check("argument validation still applies, as an isError result",
+          (s, j.get("result", {}).get("isError")), (200, True))
     s, j, _ = wsgi(app, rpc("resources/read", {"uri": "schema://demo"}), V)
     check("resources/read served", j["result"]["contents"][0]["text"], "{}")
     s, j, _ = wsgi(app, rpc("tools/list"), {**V, "Mcp-Method": "tools/call"})

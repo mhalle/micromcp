@@ -242,8 +242,9 @@ def untested_defenses():
         @m.tool
         def pyd(o: POuter) -> dict:
             return {"n": o.inner.n}
-        check("unknown key inside a nested pydantic model -> -32602",
-              code(wsgi(srv, "tools/call", {"name": "pyd", "arguments": {"o": {"inner": {"n": 1, "zzz": 1}}}})), (400, -32602))
+        r = wsgi(srv, "tools/call", {"name": "pyd", "arguments": {"o": {"inner": {"n": 1, "zzz": 1}}}})
+        check("unknown key inside a nested pydantic model -> refused (an isError result)",
+              (r[0], result(r).get("isError") if isinstance(result(r), dict) else None), (200, True))
     except ImportError:
         print("  skip  (pydantic not installed)")
 
@@ -353,15 +354,15 @@ def new_invariants():
     check("explicit output_schema with an unresolvable $ref -> isError, not a vacuous pass",
           result(wsgi(srv, "tools/call", {"name": "refout", "arguments": {}})).get("isError"), True)
 
-    print("— N6 a streaming tool with invalid arguments keeps its 400, not a 200 SSE frame —")
+    print("— N6 a streaming tool with invalid arguments answers one JSON isError, not an SSE stream —")
     @m.tool
     async def crunch(steps: int = 3, ctx: Context = None) -> dict:
         return {"processed": steps}
     app = ASGIServer(m)
     st, hd, data, _ = asyncio.run(asgi(app, H("crunch"), json.dumps(body("tools/call", {"name": "crunch", "arguments": {"steps": "three"}})).encode()))
-    check("bad args on a Context tool -> 400 application/json -32602",
-          (st, hd.get("content-type"), (json.loads(data) if hd.get("content-type") == "application/json" else {}).get("error", {}).get("code")),
-          (400, "application/json", -32602))
+    check("bad args on a Context tool -> 200 application/json isError",
+          (st, hd.get("content-type"), (json.loads(data) if hd.get("content-type") == "application/json" else {}).get("result", {}).get("isError")),
+          (200, "application/json", True))
     st, hd, data, _ = asyncio.run(asgi(app, H("crunch"), json.dumps(body("tools/call", {"name": "crunch", "arguments": {"steps": 2}}, token="t")).encode()))
     check("good args still stream", (st, hd.get("content-type")), (200, "text/event-stream"))
 

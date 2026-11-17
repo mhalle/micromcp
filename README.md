@@ -62,8 +62,13 @@ returns `isError: true` in-band rather than an HTTP error, which is what lets a
 model reason about it.
 
 Arguments are validated against the generated `inputSchema` before the handler
-runs: a wrong type, a missing key, or an unexpected one is `-32602` (the schema
-closes `additionalProperties`, nested objects included). Validated JSON is then
+runs: a wrong type, a missing key, or an unexpected one is answered with an
+`isError` result naming the problem (`Invalid arguments for tool add: a must be
+integer`), so the model can read it and retry, as 2026-07-28 specifies; the
+handler is not called. The schema closes `additionalProperties`, nested objects
+included. A call that is itself malformed, such as `arguments` that is not an
+object, is still `-32602`, and so is any call to a tool the caller may not use,
+whatever its arguments. Validated JSON is then
 converted to what the signature declares — `date`, `Enum`, `set`, `tuple`,
 `Path`, dataclass, pydantic model — so the handler receives real objects, not
 strings and lists. When a tool declares an `outputSchema`, its
@@ -75,8 +80,9 @@ dates, paths, and pydantic models all map to the right schema, and the
 validator enforces what those schemas say — including the `minimum`,
 `pattern`, `const`, `format`, and `$ref` constraints pydantic emits, with
 nested `$defs` namespaced per parameter so two models' inner classes cannot
-collide. Conversion errors are answered with a constant `-32602`; the
-validator's text stays in the server log. A Google- or
+collide. A conversion error is answered with a constant `isError` text
+(`Invalid arguments for tool <name>`); the validator's text stays in the
+server log. A Google- or
 NumPy-style `Args:` section in the docstring becomes per-parameter
 `description`s and is removed from the tool description the model reads.
 
@@ -751,7 +757,7 @@ on ephemeral ports. Ports and servers are never shared between suites.
 test_micromcp.py    29 unit assertions, stdlib only
 conform.py          12 checks against the strict mcp-types wire schema
 test_identity.py    83 checks: identity fields, icons, the Server Card on both transports
-test_guards.py      30 checks: async guards, hidden streaming tools, path=, template shadowing
+test_guards.py      38 checks: async guards, hidden streaming tools, path=, shadowing, bad arguments
 test_fallback.py    42 checks: fallback= on both transports, Host guard, WebSockets, lifespan
 test_skills.py      154 checks: skills, directory reads, the frontmatter subset (against PyYAML)
 interop.py          end-to-end with the official mcp client, 9 assertions
@@ -760,8 +766,8 @@ test_progress.py    40 SSE checks: ordering, cancellation, subscriptions/listen,
 test_legacy.py      legacy="stateless" serving, OAuth handoff, two review rounds, both transports
 harnesses.py        wsgiref, Flask, Starlette, waitress, gunicorn
 ergonomics.py       API tour, 12 assertions
-test_hardening.py   247 regression checks from four adversarial reviews + UI apps
-test_defender.py    60 checks from the defensive audit (mutation-derived)
+test_hardening.py   248 regression checks from four adversarial reviews + UI apps
+test_defender.py    61 checks from the defensive audit (mutation-derived)
 ```
 
 `conform.py` validates every result and notification against the official

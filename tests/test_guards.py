@@ -1,6 +1,8 @@
-"""Guards that are coroutines, a hidden streaming tool, and path= that cannot
-match: three fail-open paths found in the November 2026 security review.
-Each check here failed before the fix."""
+"""Guards that are coroutines, a hidden streaming tool, path= that cannot
+match, and hidden entries that shadow visible ones: fail-open paths found in
+the November 2026 security review. Also how bad tool arguments are answered
+(an isError result, unless the tool is hidden). Each check here failed
+before its fix."""
 import asyncio
 import functools
 import io
@@ -259,6 +261,54 @@ check("path='mcp' is refused", raises(lambda: Server(mcp, path="mcp"), ValueErro
 check("... also with a fallback, which would have received MCP traffic and its token",
       raises(lambda: Server(mcp, path="mcp", fallback=files), ValueError), "ValueError")
 check("path='/mcp' is fine", type(Server(mcp, path="/mcp")).__name__, "Server")
+
+# ── bad arguments are a tool execution error, but not for a hidden tool ─────
+print("\nbad arguments: isError for a tool the caller may use, Unknown tool otherwise")
+amcp = MCP("args", "1")
+ran = []
+
+
+@amcp.tool
+def add(a: int, b: int) -> int:
+    """Add."""
+    ran.append("add")
+    return a + b
+
+
+@amcp.tool(guards=[lambda who: who == "staff"])
+def hidden_add(a: int) -> int:
+    """Hidden."""
+    ran.append("hidden_add")
+    return a
+
+
+@amcp.tool
+async def slow_add(a: int, ctx: Context) -> int:
+    """Streams."""
+    ran.append("slow_add")
+    return a
+
+
+aapp = Server(amcp, authenticate=lambda h: h.get("authorization", "").removeprefix("Bearer ") or None)
+s, body = rpc(aapp, "tools/call", {"name": "add", "arguments": {"a": "x", "b": 1}})
+check("a wrong type is a 200 result with isError, naming the problem",
+      (s, body["result"].get("isError"), body["result"]["content"][0]["text"]),
+      (200, True, "Invalid arguments for tool add: a must be integer"))
+check("... and the handler never ran", ran, [])
+check("a missing argument likewise",
+      rpc(aapp, "tools/call", {"name": "add", "arguments": {"a": 1}})[1]["result"]["isError"], True)
+check("arguments that are not an object are still a malformed call: 400/-32602",
+      err(rpc(aapp, "tools/call", {"name": "add", "arguments": [1, 2]}))[:2], (400, -32602))
+check("a hidden tool with bad arguments answers like a missing one, not with isError",
+      err(rpc(aapp, "tools/call", {"name": "hidden_add", "arguments": {"a": "x"}})),
+      (400, -32602, "Unknown tool: hidden_add"))
+check("... while its caller gets the isError",
+      rpc(aapp, "tools/call", {"name": "hidden_add", "arguments": {"a": "x"}}, auth="Bearer staff")[1]
+      ["result"]["isError"], True)
+check("a Context tool with bad arguments answers one JSON result, not a stream",
+      rpc(aapp, "tools/call", {"name": "slow_add", "arguments": {"a": "x"}},
+          accept="application/json, text/event-stream")[1]["result"]["isError"], True)
+check("no handler ran for any of them", ran, [])
 
 # ── a hidden resource does not shadow a visible template ────────────────────
 print("\na hidden resource or template is passed over, not answered")

@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Core
+- **Behavior change:** a `tools/call` whose arguments fail the tool's schema or
+  conversion is answered with a `200` result carrying `isError: true` and a
+  message naming the problem (`Invalid arguments for tool add: a must be
+  integer`), not a `400` with `-32602`. The 2026-07-28 schema was corrected to
+  say so: argument errors are tool execution errors the model can read and
+  correct, while `-32602` is for a call that is itself malformed (`arguments`
+  not an object), which keeps it. The handler is still not called. A tool the
+  caller may not use still answers `Unknown tool` whatever its arguments, and a
+  `Context` tool with bad arguments answers one JSON result rather than a
+  stream. Conversion failures keep their constant text, so validator detail
+  stays in the server log. Legacy (2025-era) requests get the same `isError`.
+
 ## 0.3.0 — 2026-11-16
 
 A security release. A November 2026 adversarial review found that an
